@@ -2,12 +2,11 @@ import argparse
 import logging
 import yaml
 import os
-import concurrent
+import concurrent.futures
 import yahoodl
 import sys
 import re
 import deltaconv
-from datetime import datetime, timedelta, date
 import azlib as az
 import azlib.azlogging
 
@@ -28,7 +27,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="tool for constructing financial database")
 
-    parser.add_argument("selection", nargs="?", help="symbols to check correlation for")
+    parser.add_argument("selection", nargs="*", help="symbols to check correlation for")
 
     vgroup = parser.add_mutually_exclusive_group()
     vgroup.add_argument("-v", action="count", default=0, help="verbosity")
@@ -78,7 +77,7 @@ if __name__ == "__main__":
 
         symbols_to_fetch = []
         groups_selected = []
-        for entry in args.symbols:
+        for entry in args.selection:
             expanded = az.globber(entry, sym_groups)
             if not expanded:
                 symbols_to_fetch.append(entry)

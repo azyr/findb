@@ -23,6 +23,7 @@ def convert(filename, column=6, visualize=False, max_adj_outliers=10, modfolder=
     mod_dir = os.path.join(os.path.dirname(filename), modfolder)
     basename = os.path.basename(filename)[:-4]
     dailyfile = os.path.join(mod_dir, basename + "_D.csv")
+    dailyscorefile = os.path.join(mod_dir, basename + "_DS.csv")
     weeklyfile = os.path.join(mod_dir, basename + "_W.csv")
 
     if not os.path.exists(mod_dir):
@@ -211,58 +212,6 @@ def convert(filename, column=6, visualize=False, max_adj_outliers=10, modfolder=
     else:
         logging.debug("No possible outliers found based on initial z-score analysis (maxpctdiff: {})"
                       .format(maxpctdiff))
-    #
-    # n, bins, _ = plt.hist(zscores[~np.isnan(zscores)], 50, normed=False, facecolor='g')
-    # logging.debug("Starting to find outliers with standard deviation of {:.4%}".format(std_deltapct))
-    # for i in range(len(n)):
-    #     logging.info("{}: {}".format(bins[i], n[i]))
-    # # plt.show()
-
-
-    # num_outliers = 0
-    # outlier_indices = []
-    # start_stddeltapct = 1e20  # just make sure first iteration will be run
-
-    # while std_deltapct / start_stddeltapct < 0.5:
-    #
-    #     no_check = False
-    #     start_stddeltapct = std_deltapct
-    #     logging.debug("Starting to find outliers with standard deviation of {:.4%}".format(std_deltapct))
-    #
-    #     for i in range(len(deltapct)):
-    #         absdelta = abs(deltapct[i])
-    #         zscore = abs(deltapct[i]) / std_deltapct
-    #         # sometimes there is this strange error where prices are spiked by multiplier of 10,
-    #         # this will totally screw up stddev so we need this extra check
-    #         if no_check or absdelta > 9.89 or zscore > numstd:
-    #             median_before = np.median(closes[max(i-MEDIAN_LEN, 0):i])
-    #             median_after = np.median(closes[i:min(i+MEDIAN_LEN, len(closes) + 1)])
-    #             distance_to_after = abs(closes[i] - median_after)
-    #             distance_to_after_pct = abs((closes[i] / median_after) - 1)
-    #             distance_to_after_zscore = distance_to_after_pct / std_deltapct
-    #
-    #             distance_between_medians = abs(median_after - median_before)
-    #
-    #             logging.log(5, "Line: {}, z-score: {}, close: {}, median_before: {}, median_after: {}, mzscore={}"
-    #                         .format(i + lines_taken + 1, zscore, closes[i], median_before, median_after,
-    #                                 distance_to_after_zscore))
-    #
-    #             if distance_to_after_pct > 9.89 * .9 or \
-    #                     (distance_to_after > distance_between_medians and distance_to_after_zscore > numstd * .8):
-    #
-    #                 logging.debug("Outlier at line {} (z-score={}, deltapct={:.2%})"
-    #                               .format(i + lines_taken + 1, zscore, absdelta))
-    #                 deltapct[i] = np.nan
-    #                 outlier_indices.append(i)
-    #                 num_outliers += 1
-    #                 no_check = True
-    #                 std_deltapct = bn.nanstd(np.abs(deltapct))
-    #                 logging.debug("Standard deviation of absolute deltas changed to: {:.4%}".format(std_deltapct))
-    #
-    #             # after an outlier the next data point will be corrupted as well, so we will remove it
-    #             elif no_check:
-    #                 deltapct[i] = np.nan
-    #                 no_check = False
 
     if visualize:
         closes = np.asarray(closes)
@@ -286,34 +235,43 @@ def convert(filename, column=6, visualize=False, max_adj_outliers=10, modfolder=
                           num_invalid_chrono_orders, len(confirmed_outliers)))
 
     indices_to_rem = list(set(gap_indices + confirmed_outliers + invalid_price_indices))
-    datesord = np.delete(datesord, indices_to_rem)
-    dates = np.asarray(dates)
-    dates = np.delete(dates, indices_to_rem)
-    deltapct = np.delete(deltapct, indices_to_rem)
-    closes = np.delete(closes, indices_to_rem)
-    assert(not np.any(np.isnan(deltapct[1:])))
+    datesordmod = np.delete(datesord, indices_to_rem)
+    datesmod = np.asarray(dates)
+    datesmod = np.delete(datesmod, indices_to_rem)
+    deltapctmod = np.delete(deltapct, indices_to_rem)
+    closesmod = np.delete(closes, indices_to_rem)
+    assert(not np.any(np.isnan(deltapctmod[1:])))
 
     weeklydeltapct = []
-    weeklydatesord = []
+    weeklydatesordmod = []
     lastidx = -1
-    for i in range(len(closes)):
-        if dates[i].weekday() == 4:
-            dd = datesord[i] - datesord[lastidx]
+    for i in range(len(closesmod)):
+        if datesmod[i].weekday() == 4:
+            dd = datesordmod[i] - datesordmod[lastidx]
             if lastidx >= 0 or dd == 7:
-                if closes[lastidx] >= 0:
-                    weeklydeltapct.append(closes[i] / closes[lastidx] - 1)
-                    weeklydatesord.append(datesord[i])
+                if closesmod[lastidx] >= 0:
+                    weeklydeltapct.append(closesmod[i] / closesmod[lastidx] - 1)
+                    weeklydatesordmod.append(datesordmod[i])
             else:
-                logging.log(5, "Weekly bar at {} (idx: {}) skipped (delta: {} days)".format(dates[i], i, dd))
+                logging.log(5, "Weekly bar at {} (idx: {}) skipped (delta: {} days)".format(datesmod[i], i, dd))
             lastidx = i
 
     with open(dailyfile, 'w') as myfile:
-        for i in range(1, len(deltapct)):
-            myfile.write("{},{}\n".format(datesord[i], deltapct[i]))
+        for i in range(1, len(deltapctmod)):
+            myfile.write("{},{}\n".format(datesordmod[i], deltapctmod[i]))
 
     with open(weeklyfile, 'w') as myfile:
-        for i in range(len(weeklydatesord)):
-            myfile.write("{},{}\n".format(weeklydatesord[i], weeklydeltapct[i]))
+        for i in range(len(weeklydatesordmod)):
+            myfile.write("{},{}\n".format(weeklydatesordmod[i], weeklydeltapct[i]))
+
+    indices_to_rem = list(set(confirmed_outliers + invalid_price_indices))
+    datesordmod = np.delete(datesord, indices_to_rem)
+    deltapctmod = np.delete(deltapct, indices_to_rem)
+    assert(not np.any(np.isnan(deltapctmod[1:])))
+
+    with open(dailyscorefile, 'w') as myfile:
+        for i in range(1, len(deltapctmod)):
+            myfile.write("{},{}\n".format(datesordmod[i], deltapctmod[i]))
 
     return True
 
