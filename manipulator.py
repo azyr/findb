@@ -17,10 +17,10 @@ import pandas.tseries.offsets
 import pandas.io.data
 import bottleneck as bn
 import numpy as np
+import findb.selector
 import matplotlib.pyplot as plt
 from datetime import datetime
 from pandas import DataFrame, Series
-from selector import *
 
 
 fred_currencies = {
@@ -89,7 +89,7 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
         #     with open(groupfile, 'w') as yamlfile:
         #         yamlfile.write("# empty groupsfile, remove .p cachefile after each write\n")
 
-    symbols = selections_to_symbols(selections, groupfile)
+    symbols = findb.selector.selections_to_symbols(selections, groupfile)
 
     symbols_to_remove_from_groups = []
 
@@ -467,6 +467,65 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
     return (res_daily, res_weekly, res_dailyscore), None
 
 
+def fetch_deltas(selections, findbdir=None, visualize=False):
+
+    if not findbdir:
+        home = os.path.expanduser("~")
+        findbdir = os.path.join(home, 'findb')
+
+    groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
+    symbols = findb.selector.selections_to_symbols(selections, groupfile)
+    print(symbols)
+    print(selections)
+    print(findbdir)
+
+    dbfile = os.path.join(findbdir, 'db.h5')
+    for sym in symbols:
+        print()
+        store = pd.io.pytables.HDFStore(dbfile, 'r')
+        symloc = "/yahoo/{}".format(sym)
+        if symloc not in store:
+            store.close()
+            logging.debug("{} was not found in HDS-file, skipping...".format(sym))
+            continue
+        dloc = '/yahoo/{}_D'.format(sym)
+        wloc = '/yahoo/{}_W'.format(sym)
+        dsloc = '/yahoo/{}_DS'.format(sym)
+        underlying_sha1 = hashlib.sha1(pickle.dumps(store[symloc])).digest()
+        db = tables.open_file(dbfile, 'r')
+        delta_calculation_needed = False
+        if not dloc in db or "underlying_sha1" not in db.get_node(dloc)._v_attrs or \
+                        underlying_sha1 != db.get_node(dloc)._v_attrs["underlying_sha1"]:
+            delta_calculation_needed = True
+        if not wloc in db or "underlying_sha1" not in db.get_node(wloc)._v_attrs or \
+                        underlying_sha1 != db.get_node(wloc)._v_attrs["underlying_sha1"]:
+            delta_calculation_needed = True
+        if not dsloc in db or "underlying_sha1" not in db.get_node(dsloc)._v_attrs or \
+                        underlying_sha1 != db.get_node(dsloc)._v_attrs["underlying_sha1"]:
+            delta_calculation_needed = True
+        db.close()
+        store.close()
+        if delta_calculation_needed:
+            store = pd.io.pytables.HDFStore(dbfile, 'a')
+            logging.debug("Performing delta-conversion to {}...".format(sym))
+            res, err = deltaconvert(store[symloc], -1, visualize)
+            if res:
+                store[dloc] = res[0]
+                store[wloc] = res[1]
+                store[dsloc] = res[2]
+                store.close()
+                db = tables.open_file(dbfile, 'a')
+                db.get_node(dloc)._v_attrs["underlying_sha1"] = underlying_sha1
+                db.get_node(wloc)._v_attrs["underlying_sha1"] = underlying_sha1
+                db.get_node(dsloc)._v_attrs["underlying_sha1"] = underlying_sha1
+                db.close()
+                logging.info("Delta-conversion for {} finished.".format(sym))
+            else:
+                store.close()
+                logging.warning("Error when delta-converting {}: {}".format(sym, err))
+        else:
+            logging.debug("Delta-conversion not needed for {}.".format(sym))
+
 
 if __name__ == "__main__":
 
@@ -503,68 +562,4 @@ if __name__ == "__main__":
         download_yahoo(args.selections, args.dlthreads, findbdir, args.batchsize, args.usd, args.modifygroups)
 
     if args.delta:
-
-        if not symbols:
-            groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
-            symbols = selections_to_symbols(args.selections, groupfile)
-
-        dbfile = os.path.join(findbdir, 'db.h5')
-        for sym in symbols:
-            store = pd.io.pytables.HDFStore(dbfile, 'r')
-            symloc = "/yahoo/{}".format(sym)
-            if symloc not in store:
-                logging.debug("{} was not found in HDS-file, skipping...")
-                continue
-            dloc = '/yahoo/{}_D'.format(sym)
-            wloc = '/yahoo/{}_W'.format(sym)
-            dsloc = '/yahoo/{}_DS'.format(sym)
-            underlying_sha1 = hashlib.sha1(pickle.dumps(store[symloc])).digest()
-            db = tables.open_file(dbfile, 'r')
-            delta_calculation_needed = False
-            if not dloc in db or "underlying_sha1" not in db.get_node(dloc)._v_attrs or \
-                            underlying_sha1 != db.get_node(dloc)._v_attrs["underlying_sha1"]:
-                delta_calculation_needed = True
-            if not wloc in db or "underlying_sha1" not in db.get_node(wloc)._v_attrs or \
-                            underlying_sha1 != db.get_node(wloc)._v_attrs["underlying_sha1"]:
-                delta_calculation_needed = True
-            if not dsloc in db or "underlying_sha1" not in db.get_node(dsloc)._v_attrs or \
-                            underlying_sha1 != db.get_node(dsloc)._v_attrs["underlying_sha1"]:
-                delta_calculation_needed = True
-            db.close()
-            store.close()
-            if delta_calculation_needed:
-                store = pd.io.pytables.HDFStore(dbfile, 'a')
-                logging.debug("Performing delta-conversion to {}...".format(sym))
-                res, err = deltaconvert(store[symloc], -1, args.visualize)
-                if res:
-                    store[dloc] = res[0]
-                    store[wloc] = res[1]
-                    store[dsloc] = res[2]
-                    store.close()
-                    db = tables.open_file(dbfile, 'a')
-                    db.get_node(dloc)._v_attrs["underlying_sha1"] = underlying_sha1
-                    db.get_node(wloc)._v_attrs["underlying_sha1"] = underlying_sha1
-                    db.get_node(dsloc)._v_attrs["underlying_sha1"] = underlying_sha1
-                    db.close()
-                    logging.info("Delta-conversion for {} finished.".format(sym))
-                else:
-                    logging.warning("Error when delta-converting {}: {}".format(sym, err))
-            else:
-                logging.debug("Delta-conversion not needed for {}.".format(sym))
-        # logging.debug("Delta conversion finished.")
-
-
-            # deltaconvert()
-    #     filenames = []
-    #     for symbol in symbols:
-    #         filename = os.path.join(PROGRAM_DIR, "db", "daily", "ohlcvc", symbol + ".csv")
-    #         filenames.append(filename)
-    #     for filename in filenames:
-    #         # check how many columns to figure out the right column number
-    #         with open(filename, 'r') as csvfile:
-    #             header = csvfile.readline()
-    #             splitted = header.split(',')
-    #         if deltaconvert(filename, len(splitted) - 1, args.visualize):
-    #             logging.debug("Delta-conversion/spike fixes for {} succesfully completed.".format(filename))
-    #         else:
-    #             logging.info("Delta-conversion/spike fixes for {} failed.".format(filename))
+        fetch_deltas(args.selections, findbdir, args.visualize)

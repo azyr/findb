@@ -6,7 +6,7 @@ import hashlib
 import azlib as az
 import pandas as pd
 from datetime import datetime, date
-# from .settings import *
+import findb.manipulator
 
 FILTER_DICT = {
     "date": 0,
@@ -59,7 +59,12 @@ def read_groups(groupsfile):
     #     return pickle.load(open(groupsfile, 'rb'))
 
 
-def selections_to_symbols(selections, groupsfile):
+def selections_to_symbols(selections, groupsfile=None):
+
+    if not groupsfile:
+        home = os.path.expanduser("~")
+        findbdir = os.path.join(home, 'findb')
+        groupsfile = os.path.join(findbdir, 'yahoogroups.yaml')
 
     sym_groups = read_groups(groupsfile)
 
@@ -80,7 +85,13 @@ def selections_to_symbols(selections, groupsfile):
     return symbols
 
 
-def get_yahoo_bars(selections, bartype=""):
+def get_yahoo_bars(selections, bartype="", **kwargs):
+
+    kwargs.setdefault("fetch_missing", True)
+    kwargs.setdefault("dlthreads", 5)
+    kwargs.setdefault("batchsize", 100)
+    kwargs.setdefault("dl_conv_usd", True)
+    kwargs.setdefault("modifygroups", True)
 
     home = os.path.expanduser("~")
     findbdir = os.path.join(home, 'findb')
@@ -88,94 +99,50 @@ def get_yahoo_bars(selections, bartype=""):
     groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
     symbols = selections_to_symbols(selections, groupfile)
 
-    store = pd.io.pytables.HDFStore(dbfile, 'r')
+
+
+    if kwargs["fetch_missing"]:
+
+        missing_symbols = []
+        missing_deltas = []
+        store = pd.io.pytables.HDFStore(dbfile, 'r')
+
+        for sym in symbols:
+            basesymloc = "/yahoo/{}".format(sym)
+            symloc = "/yahoo/{}_{}".format(sym, bartype)
+            if basesymloc not in store:
+                missing_symbols.append(sym)
+                missing_deltas.append(sym)
+            elif symloc not in store:
+                missing_deltas.append(sym)
+
+        store.close()
+
+        if missing_symbols:
+            logging.info("Downloading {} missing symbols...".format(len(missing_symbols)))
+            findb.manipulator.download_yahoo(missing_symbols, kwargs["dlthreads"], findbdir, kwargs["batchsize"],
+                           kwargs["dl_conv_usd"], kwargs["modifygroups"])
+
+        if bartype and missing_deltas:
+            logging.info("Calculating deltas for {} symbols...".format(len(missing_deltas)))
+            findb.manipulator.fetch_deltas(missing_deltas, findbdir)
 
     res = {}
+    store = pd.io.pytables.HDFStore(dbfile, 'r')
 
     for sym in symbols:
-
+        basesymloc = "/yahoo/{}".format(sym)
+        symloc = "/yahoo/{}_{}".format(sym, bartype)
         if not bartype:
-            symloc = "/yahoo/{}".format(sym)
+            if basesymloc not in store:
+                logging.warning("No data found for {}".format(sym))
+            else:
+                res[sym] = store[basesymloc]
         else:
-            symloc = "/yahoo/{}{}_".format(sym, bartype)
-        res[sym] = store[symloc]
+            if symloc not in store:
+                logging.warning("No delta-data found for {}".format(sym))
+            else:
+                res[sym] = store[symloc]
 
     store.close()
     return res
-
-#
-# def get_weekly_delta(selections):
-#
-#     home = os.path.expanduser("~")
-#     findbdir = os.path.join(home, 'findb')
-#     dbfile = os.path.join(findbdir, 'db.h5')
-#     groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
-#     symbols = selections_to_symbols(selections, groupfile)
-#
-#     store = pd.io.pytables.HDFStore(dbfile, 'r')
-#
-#     res = {}
-#
-#     for sym in symbols:
-#
-#         symloc = "/yahoo/{}_W".format(sym)
-#         res[sym] = store[symloc]
-#
-#     store.close()
-#     return res
-
-
-
-
-# def get_daily_bars(selections, **kwargs):
-#
-#     use_dateord = False
-#     if "dateord" in kwargs:
-#         use_dateord = kwargs["dateord"]
-#
-#     if "filter" in kwargs:
-#         txtfilter = kwargs["filter"]
-#         txtfilter = txtfilter.split(",")
-#         for i in len(txtfilter):
-#             txtfilter[i] = txtfilter[i].strip().lower()
-#         filter = {FILTER_DICT[s]: i for i, s in enumerate(txtfilter)}
-#     else:
-#         filter = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 6}
-#
-#
-#     symbols = selections_to_symbols(selections, YAHOO_GROUPS)
-#     logging.info("Fetching data for {} symbols...".format(len(symbols)))
-#     results = {}
-#
-#     # TODO: possibly this could be faster?
-#     for symbol in symbols:
-#         filename = os.path.join(PROGRAM_DIR, "db", "daily", "ohlcvc", symbol + ".csv")
-#         # filenames.append(filename)
-#         with open(filename, 'r') as csvfile:
-#             data = [[]] * len(filter)
-#             csvfile.readline()  # skip header
-#             lines = csvfile.readlines()
-#             lines.reverse()
-#             for line in lines:
-#                 splitted = line.split(",")
-#                 if 0 in filter:
-#                     date = splitted[0]
-#                     if use_dateord:
-#                         date = datetime.strptime(date, "%Y-%m-%d").date().toordinal()
-#                     data[filter[0]].append(date)
-#                 if 1 in filter:
-#                     data[filter[1]].append(float(splitted[1]))
-#                 if 2 in filter:
-#                     data[filter[2]].append(float(splitted[2]))
-#                 if 3 in filter:
-#                     data[filter[3]].append(float(splitted[3]))
-#                 if 4 in filter:
-#                     data[filter[4]].append(float(splitted[4]))
-#                 if 5 in filter:
-#                     data[filter[5]].append(int(splitted[5]))
-#                 if 6 in filter:
-#                     # always use the USD column
-#                     data[filter[6]].append(float(splitted[-1]))
-#             results[symbol] = data
-#
-#     return results
