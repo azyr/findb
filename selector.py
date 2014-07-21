@@ -78,7 +78,8 @@ def selections_to_symbols(selections, groupsfile=None):
             groups_selected += expanded
             for group in expanded:
                 symbols += sym_groups[group]
-    logging.debug("Groups selected: {}".format(set(groups_selected)))
+    if groups_selected:
+        logging.debug("Groups selected: {}".format(set(groups_selected)))
 
     symbols = list(set(symbols))
     symbols.sort()

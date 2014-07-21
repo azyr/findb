@@ -48,21 +48,22 @@ def convert_to_usd(symbol, dbfile):
     :return: True = converted, False = not converted
     """
 
-    db = pd.io.pytables.HDFStore(dbfile, 'a')
+    store = pd.io.pytables.HDFStore(dbfile, 'a')
     symloc = "/yahoo/{}".format(symbol)
-    ydata = db[symloc]
+    ydata = store[symloc]
     lastcol = ydata.columns[-1]
     currency = lastcol[-4:-1]
     if currency == "USD":  # conversion not required
+        store.close()
         return False
     fxfile = fred_currencies[currency]
     fxfileloc = "/fred/{}".format(fxfile)
-    usdxxx = db[fxfileloc]
+    usdxxx = store[fxfileloc]
     usdxxx.fillna(method='ffill')  # fill missing dates (i.e. US holidays) using the last available value
 
     ydata["AdjClose(USD)"] = ydata[lastcol] / usdxxx
-    db[symloc] = ydata
-    db.close()
+    store[symloc] = ydata
+    store.close()
 
 
 def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True, modify_groups=False):
@@ -191,7 +192,7 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
                     downloaded_symbols.append(symbol)
                     logging.debug("Downloaded {} from Yahoo succesfully.".format(symbol))
                 else:
-                    logging.debug("{} was not found.".format(symbol))
+                    # logging.debug("{} was not found.".format(symbol))
                     symbols_to_remove_from_groups.append(symbol)
 
         logging.debug("Saving batch data to the HDF-file...")
@@ -475,13 +476,9 @@ def fetch_deltas(selections, findbdir=None, visualize=False):
 
     groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
     symbols = findb.selector.selections_to_symbols(selections, groupfile)
-    print(symbols)
-    print(selections)
-    print(findbdir)
 
     dbfile = os.path.join(findbdir, 'db.h5')
     for sym in symbols:
-        print()
         store = pd.io.pytables.HDFStore(dbfile, 'r')
         symloc = "/yahoo/{}".format(sym)
         if symloc not in store:
