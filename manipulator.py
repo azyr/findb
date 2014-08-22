@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 from datetime import datetime
 from pandas import DataFrame, Series
 
-
+"""Lookup table for FRED symbols"""
 fred_currencies = {
     "JPY": "DEXJPUS",
     "EUR": "DEXUSEU",
@@ -39,15 +39,13 @@ fred_currencies = {
     "DKK": "DEXDNUS"
 }
 
-
 def convert_to_usd(symbol, dbfile):
-    """
-    Converts symbol to USD in the HDF-file (dbfile)
-    :param symbol:
-    :param dbfile:
-    :return: True = converted, False = not converted
-    """
+    """Convert yahoo symbol to USD in the HDF-file.
 
+    Arguments:
+    symbol  -- symbol to convert
+    dbfile  -- database file
+    """
     store = pd.io.pytables.HDFStore(dbfile, 'a')
     symloc = "/yahoo/{}".format(symbol)
     ydata = store[symloc]
@@ -58,22 +56,37 @@ def convert_to_usd(symbol, dbfile):
         return False
     fxfile = fred_currencies[currency]
     fxfileloc = "/fred/{}".format(fxfile)
-    usdxxx = store[fxfileloc]
-    usdxxx.fillna(method='ffill')  # fill missing dates (i.e. US holidays) using the last available value
-
-    ydata["AdjClose(USD)"] = ydata[lastcol] / usdxxx
+    xxxusd = store[fxfileloc]
+    xxxusd.fillna(method='ffill')  # fill missing dates (i.e. US holidays) using the last available value
+    ydata["AdjClose(USD)"] = ydata[lastcol] * xxxusd
     store[symloc] = ydata
     store.close()
 
+def create_empty_db():
+    """Create empty database directory."""
+    home = os.path.expanduser("~")
+    findbdir = os.path.join(home, 'findb')
+    dbfile = os.path.join(findbdir, 'db.h5')
+    if os.path.isfile(dbfile):
+        raise Exception("{} already exists.".format(dbfile))
+    db = tables.open_file(dbfile, 'w')
+    db.create_group('/', 'yahoo')
+    db.create_group('/', 'fred')
+    db.close()
 
-def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True, modify_groups=False):
-    """
-    Downloads Daily data from Yahoo Finance.
-    Parameters:
-        symbols = list of symbols and group names to fetch
-        modify_groups = flag to remove bad symbols from groups file
-    Returns:
-        List of symbols that were succesfully downloaded (or existed in the database already)
+def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True, modify_groups=False, update_freq=1):
+
+    """Download daily data from Yahoo Finance.
+
+    Arguments:
+    selections       -- symbols or symbol groups to download
+    dl_threads       -- # of threads to use when downloading
+    findbdir         -- database directory
+    batchsize        -- how many symbols to download in one iteration
+                        (bigger number = faster / more memory used)
+    conv_to_usd      -- convert to USD after finished downloading the data
+    modify_groups    -- remove non-existent symbols from yahoogroups.yaml
+    update_freq      -- how many business days to wait until updating data
     """
 
     if not selections:
@@ -113,7 +126,7 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
             symbols_to_fetch.append(sym)
             continue
         # more than one businessday ago
-        if az.utcnow().to_datetime() - pd.tseries.offsets.BDay(1) > attrs['last_update']:
+        if az.utcnow().to_datetime() - pd.tseries.offsets.BDay(update_freq) > attrs['last_update']:
             symbols_to_fetch.append(sym)
             continue
         logging.debug("{} up-to-date, skipping download...".format(sym))
@@ -221,7 +234,6 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
             with open(groupfile, mode='w') as myfile:
                 myfile.writelines(lines)
 
-        # TODO: continue from here!
         if conv_to_usd:
             logging.info("Converting to USD...")
             for sym in results:
@@ -231,6 +243,15 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
     return downloaded_symbols
 
 def change_to_score(change):
+    """Create a change-score out of a return 'change'
+
+    Used internally. Changescore shows proper magnitude of loss/gain.
+    Simple change percent will make gains always look bigger than losses
+    when standardized.
+
+    Arguments:
+    change -- return to calculate the change-score for
+    """
     if change >= 1:
         changescore = change - 1
     elif change < 1:
@@ -238,12 +259,30 @@ def change_to_score(change):
         changescore += 1
     return changescore
 
-
 def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=10):
 
-    # daily = _D
-    # weekly = _W
-    # dailyscore = _DS
+    """Perform delta-conversion based on the given column in a pandas.DataFrame.
+
+    Delta-conversion returns 3 series as a tuple and possibly error message.
+    
+    First series (D) contains daily returns where all the data has been removed
+    that could make comparison difficult with other assets.
+
+    Second series (W) contains weekly returns where all the data has been removed
+    that could make comparison difficult with other assets.
+
+    Third series (DS) contains daily returns where all the outliers and erroneus
+    data points have been removed but holes in data are not taken into account.
+    This is more suitable for calculating performance scores etc.
+
+    Arguments:
+    df               -- pd.DataFrame to use
+    column           -- column header to use
+    visualize        -- visualize results
+    max_adj_outliers -- maximum number of adjancent outliers, if there are
+                        actually more adjancent outliers than this then they will
+                        not be considered outliers anymore. default value: 10
+    """
 
     # MEDIAN_LEN = 50
     ZSCORE_CUT_RATIO = 2
@@ -469,6 +508,14 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
 
 
 def fetch_deltas(selections, findbdir=None, visualize=False):
+
+    """Fetch deltas for the given selections (yahoo) and save to HDF-database.
+
+    Arguments:
+    selections  -- yahoo symbols or symbol groups to calculate the deltas for
+    findbdir    -- database directory
+    visualize   -- visualize results
+    """
 
     if not findbdir:
         home = os.path.expanduser("~")
