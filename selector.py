@@ -1,13 +1,12 @@
 import logging
 import os.path
 import pickle
-import tables
 import hashlib
 import azlib as az
 import pandas as pd
-from datetime import datetime, date
 import findb.manipulator
 import yaml
+
 
 def read_groups(groupsfile):
     """Read groupfile. Return a dictionary.
@@ -141,7 +140,8 @@ def get_yahoo_bars(selections, bartype="", **kwargs):
     if kwargs["fetch_missing"]:
         findb.manipulator.download_yahoo(symbols, kwargs["dlthreads"], findbdir, kwargs["batchsize"],
                            kwargs["dl_conv_usd"], kwargs["modifygroups"], kwargs["update_freq"])
-        findb.manipulator.fetch_deltas(symbols, findbdir)
+        if bartype:
+            findb.manipulator.fetch_deltas(symbols, findbdir)
 
 #        missing_symbols = []
 #        missing_deltas = []

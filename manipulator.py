@@ -3,7 +3,6 @@ import logging
 import os
 import concurrent.futures
 import yahoodl
-import sys
 import hashlib
 import re
 import io
@@ -18,26 +17,10 @@ import pandas.io.data
 import bottleneck as bn
 import numpy as np
 import findb.selector
-import matplotlib.pyplot as plt
 from datetime import datetime
 from pandas import DataFrame, Series
+from yahoodl import fred_currencies
 
-"""Lookup table for FRED symbols"""
-fred_currencies = {
-    "JPY": "DEXJPUS",
-    "EUR": "DEXUSEU",
-    "MXN": "DEXMXUS",
-    "GBP": "DEXUSUK",
-    "CAD": "DEXCAUS",
-    "AUD": "DEXUSAL",
-    "CHF": "DEXSZUS",
-    "HKD": "DEXHKUS",
-    "ZAR": "DEXSFUS",
-    "SEK": "DEXSDUS",
-    "SGD": "DEXSIUS",
-    "NOK": "DEXNOUS",
-    "DKK": "DEXDNUS"
-}
 
 def convert_to_usd(symbol, dbfile):
     """Convert yahoo symbol to USD in the HDF-file.
@@ -57,10 +40,15 @@ def convert_to_usd(symbol, dbfile):
     fxfile = fred_currencies[currency]
     fxfileloc = "/fred/{}".format(fxfile)
     xxxusd = store[fxfileloc]
-    xxxusd.fillna(method='ffill')  # fill missing dates (i.e. US holidays) using the last available value
+    # fill missing dates (i.e. US holidays) using the last available value
+    xxxusd.fillna(method='ffill')
+    # take inverse of usdxxx pairs (ending "XXUS")
+    if fxfile[-2:] == "US":
+        xxxusd = 1 / xxxusd
     ydata["AdjClose(USD)"] = ydata[lastcol] * xxxusd
     store[symloc] = ydata
     store.close()
+
 
 def create_empty_db():
     """Create empty database directory."""
@@ -179,6 +167,8 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
 
     downloaded_symbols = []
 
+    num_batches = len(list(az.chunks(symbols_to_fetch, batchsize)))
+    batch_no = 1
     for batch in az.chunks(symbols_to_fetch, batchsize):
 
         results = {}
@@ -211,13 +201,17 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
         logging.debug("Saving batch data to the HDF-file...")
         for sym, res in results.items():
             df = DataFrame.from_csv(io.StringIO(res))
+            # very rarely this will fail for some reason! (for example on CANCDA.SW)
+            # have to report this bug (or maybe it was corrupted db file)
             df.to_hdf(dbfile, '/yahoo/{}'.format(sym))
 
         logging.debug("Updating timestamps on the HDF-file...")
         db = tables.open_file(dbfile, 'a')
         for sym, res in results.items():
-            attrs = db.get_node('/yahoo/{}'.format(sym))._v_attrs
-            attrs['last_update'] = az.utcnow().to_datetime()
+            targetloc = '/yahoo/{}'.format(sym)
+            if targetloc in db:
+                attrs = db.get_node(targetloc)._v_attrs
+                attrs['last_update'] = az.utcnow().to_datetime()
         db.close()
         logging.debug("Data succesfully saved to the HDF-file.")
 
@@ -235,10 +229,14 @@ def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True
                 myfile.writelines(lines)
 
         if conv_to_usd:
-            logging.info("Converting to USD...")
+            logging.debug("Converting to USD...")
             for sym in results:
                 convert_to_usd(sym, dbfile)
-            logging.info("Succesfully converted to USD.")
+            logging.debug("Succesfully converted to USD.")
+
+        if num_batches > 1:
+            logging.info("Finished downloading batch {}/{}.".format(batch_no, num_batches))
+        batch_no += 1
 
     return downloaded_symbols
 
