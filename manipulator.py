@@ -3,7 +3,7 @@ import logging
 import os
 import re
 import concurrent.futures
-import yahoodl_mod as yahoodl
+import yahoodl
 import hashlib
 import pickle
 import threading
