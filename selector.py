@@ -3,7 +3,6 @@ import os.path
 import pickle
 import hashlib
 import azlib as az
-import pandas as pd
 import findb.manipulator
 import yaml
 
@@ -76,7 +75,7 @@ def selections_to_symbols(selections, groupsfile=None):
     if not groupsfile:
         home = os.path.expanduser("~")
         findbdir = os.path.join(home, 'findb')
-        groupsfile = os.path.join(findbdir, 'yahoogroups.yaml')
+        groupsfile = os.path.join(findbdir, 'yahoo_groups.yaml')
 
     sym_groups = read_groups(groupsfile)
 
@@ -112,86 +111,45 @@ def get_yahoo_bars(selections, bartype="", **kwargs):
 
     Keyword arguments:
     fetch_missing     -- fetch missing data (default: True)
-    dlthreads         -- # of threads to use for download (default: 5)
-    batchsize         -- batchsize for download (default: 100)
-    dl_conv_usd       -- convert to usd after download (default: True)
-    modifygroups      -- remove non-existing symbols from groupsfile 
-                         (default: True)
+    dl_threads         -- # of threads to use for download (default: 5)
     update_freq       -- update frequency (business days) when fetching data
                          (default: 1)
     """
 
-    kwargs.setdefault("fetch_missing", True)
-    kwargs.setdefault("dlthreads", 5)
-    kwargs.setdefault("batchsize", 100)
-    kwargs.setdefault("dl_conv_usd", True)
-    kwargs.setdefault("modifygroups", True)
-    kwargs.setdefault("update_freq", 1)
+    fetch_missing = kwargs.pop("fetch_missing", True)
+    dl_threads = kwargs.pop("dl_threads", 5)
+    update_freq = kwargs.pop("update_freq", 1)
+    findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
+    groups_file = kwargs.pop('groups_file', os.path.join(findb_dir, 'yahoo_groups.yaml'))
+    for kwarg in kwargs:
+        raise Exception("Keyword argument '{}' not supported.".format(kwarg))
 
-    home = os.path.expanduser("~")
-    findbdir = os.path.join(home, 'findb')
-    dbfile = os.path.join(findbdir, 'db.h5')
-    groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
-    symbols = selections_to_symbols(selections, groupfile)
+    if bartype == "":
+        suffix = ""
+    elif bartype == "D":
+        suffix = "~D"
+    elif bartype == "W":
+        suffix = "~W"
+    elif bartype == "DS":
+        suffix = "~DS"
+    else:
+        raise Exception('Bartype "{}" not supported.'.format(bartype))
 
-    if not os.path.isfile(dbfile):
-        findb.manipulator.create_empty_db()
-
-    if kwargs["fetch_missing"]:
-        findb.manipulator.download_yahoo(symbols, kwargs["dlthreads"], findbdir, kwargs["batchsize"],
-                           kwargs["dl_conv_usd"], kwargs["modifygroups"], kwargs["update_freq"])
+    if fetch_missing:
+        selections = findb.manipulator.download_yahoo(selections, findb_dir=findb_dir,
+                                                          update_freq=update_freq, 
+                                                          dl_threads=dl_threads)
         if bartype:
-            findb.manipulator.fetch_deltas(symbols, findbdir)
+            selections = findb.manipulator.fetch_deltas(selections, findb_dir=findb_dir)
+    else:
+        selections = selections_to_symbols(selections, groups_file)
 
-#        missing_symbols = []
-#        missing_deltas = []
-#        db = tables.open_file('db.h5', 'r')
-#
-#        for sym in symbols:
-#            basesymloc = "/yahoo/{}".format(sym)
-#            if basesymloc not in db:
-#                missing_symbols.append(sym)
-#                missing_deltas.append(sym)
-#            else:
-#                attrs = db.get_node(basesymloc)._v_attrs
-#                if not "last_update" in attrs:
-#                    missing_symbols.append(sym)
-#                    missing_deltas.append(sym)
-#                
-#        
-#            symloc = "/yahoo/{}_{}".format(sym, bartype)
-#            if basesymloc not in store:
-#                missing_symbols.append(sym)
-#                missing_deltas.append(sym)
-#            elif symloc not in store:
-#                missing_deltas.append(sym)
-#
-#
-#        if missing_symbols:
-#            logging.info("Downloading {} missing symbols...".format(len(missing_symbols)))
-#            findb.manipulator.download_yahoo(missing_symbols, kwargs["dlthreads"], findbdir, kwargs["batchsize"],
-#                           kwargs["dl_conv_usd"], kwargs["modifygroups"], kwargs["update_freq"])
-#
-#        if bartype and missing_deltas:
-#            logging.info("Calculating deltas for {} symbols...".format(len(missing_deltas)))
-#            findb.manipulator.fetch_deltas(missing_deltas, findbdir)
-#
     res = {}
-    store = pd.io.pytables.HDFStore(dbfile, 'r')
+    yahoo_dir = os.path.join(findb_dir, 'db', 'Yahoo')
+    for sym in selections:
+        fpath = os.path.join(yahoo_dir, sym + suffix)
+        data = pickle.load(open(fpath, 'rb'))['data']
+        if data is not None:
+            res[sym] = data
 
-    for sym in symbols:
-        basesymloc = "/yahoo/{}".format(sym)
-        symloc = "/yahoo/{}_{}".format(sym, bartype)
-        if not bartype:
-            if basesymloc not in store:
-                logging.warning("No data found for {}".format(sym))
-            else:
-                res[sym] = store[basesymloc]
-        else:
-            if symloc not in store:
-                logging.warning("No delta-data found for {}".format(sym))
-            else:
-                res[sym] = store[symloc]
-
-    store.close()
     return res

@@ -1,13 +1,12 @@
 import argparse
 import logging
 import os
-import concurrent.futures
-import yahoodl
-import hashlib
 import re
-import io
+import concurrent.futures
+import yahoodl_mod as yahoodl
+import hashlib
 import pickle
-import tables
+import threading
 import os.path
 import azlib as az
 import azlib.azlogging
@@ -18,227 +17,324 @@ import bottleneck as bn
 import numpy as np
 import findb.selector
 from datetime import datetime
-from pandas import DataFrame, Series
-from yahoodl import fred_currencies
+from pprint import pformat
 
 
-def convert_to_usd(symbol, dbfile):
-    """Convert yahoo symbol to USD in the HDF-file.
+"""Lookup table for FRED symbols.
+
+Fred is missing some currencies that appear in Yahoo Finance:
+    ILS = Israeli New Sheqel
+    RUB = Russian Ruble
+    IDR = Indonesian Rupiah
+    ARS = Argentine Peso
+"""
+fred_currencies = {
+    # USD/XYZ
+    "EUR": "DEXUSEU",
+    "GBP": "DEXUSUK",
+    "CAD": "DEXCAUS",
+    "AUD": "DEXUSAL",
+    "NZD": "DEXUSNZ",
+    # XYZ/USD
+    "CHF": "DEXSZUS",
+    "JPY": "DEXJPUS",
+    "MXN": "DEXMXUS",
+    "HKD": "DEXHKUS",
+    "ZAR": "DEXSFUS",
+    "SEK": "DEXSDUS",
+    "SGD": "DEXSIUS",
+    "NOK": "DEXNOUS",
+    "DKK": "DEXDNUS",
+    "BRL": "DEXBZUS",
+    "CNY": "DEXCHUS",
+    "INR": "DEXINUS",
+    "KRW": "DEXKOUS",
+    "MYR": "DEXMAUS",
+    "TWD": "DEXTAUS"
+}
+
+
+class FXDataNotFoundException(Exception):
+    pass
+
+
+class DeltaConversionException(Exception):
+    pass
+
+
+def default_findb_dir():
+    home = os.path.expanduser('~')
+    return os.path.join(home, 'findb')
+
+
+def check_pfile_uptodate(fpath, update_freq):
+    if not os.path.isfile(fpath):
+        return False
+    try:
+        fdict = pickle.load(open(fpath, 'rb'))
+    except EOFError as err:
+        os.remove(fpath)
+        logging.info("Removed corrupt file from db ({}): {!r}".format(fpath, err))
+        return False
+    if 'last_update' not in fdict:
+        return False
+    return az.utcnow() - pd.tseries.offsets.BDay(update_freq) < fdict['last_update']
+
+
+def save_pfile(data, fpath, save_hash=False):
+    fdict = {'data': data, 'last_update': az.utcnow()}
+    if save_hash:
+        fdict['sha1'] = hashlib.sha1(pickle.dumps(fdict)).digest()
+    pickle.dump(fdict, open(fpath, 'wb'))
+
+
+def load_pfile(fpath):
+    return pickle.load(open(fpath, 'rb'))['data']
+
+
+def load_yahoo_sym_data(findb_dir=None):
+    if not findb_dir:
+        findb_dir = default_findb_dir()
+    fpath = os.path.join(findb_dir, 'yahoo_symbols.csv')
+    return pd.DataFrame.from_csv(fpath)
+
+
+def check_yahoo_uptodate(sym, update_freq=1, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    filepath = os.path.join(db_dir, 'Yahoo', sym)
+    return check_pfile_uptodate(filepath, update_freq)
+
+
+def symbol_in_db(sym, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    filepath = os.path.join(db_dir, 'Yahoo', sym)
+    return os.path.isfile(filepath)
+
+
+def dl_and_process_yahoo_symbol(sym, currency=None, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    yahoo_dir = os.path.join(db_dir, 'Yahoo')
+    fpath = os.path.join(yahoo_dir, sym)
+    df = yahoodl.dl(sym, currency)
+    df = df.copy()
+    df = convert_to_usd(df, db_dir)
+    save_pfile(df, fpath, save_hash=True)
+
+
+def update_fred_fxdata(update_freq=1, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    sym_to_update = []
+    for sym in fred_currencies.values():
+        fpath = os.path.join(db_dir, 'FRED', sym)
+        if not check_pfile_uptodate(fpath, update_freq):
+            sym_to_update.append(sym)
+    if not sym_to_update:
+        return
+    start = datetime(1900, 1, 1)
+    end = datetime(2020, 1, 1)
+    logging.debug("{} FRED currencies up-to-date, downloading {} pairs..."
+                  .format(len(fred_currencies) - len(sym_to_update), len(sym_to_update)))
+    fxdata = pandas.io.data.DataReader(sym_to_update, 'fred', start, end)
+    for sym in fxdata:
+        fpath = os.path.join(db_dir, 'FRED', sym)
+        save_pfile(fxdata[sym], fpath)
+
+
+# This is required to serialize access to certain pandas operations
+mylock = threading.Lock()
+
+
+def convert_to_usd(df, db_dir=None):
+    """
+    Convert Yahoo historical pd.DataFrame AdjCloses to USD.
+
+    Last column must contain the currency info. (USD will be skipped)
+    Returns converted pd.DataFrame.
 
     Arguments:
-    symbol  -- symbol to convert
-    dbfile  -- database file
+    files   -- files to convert
+    db_dir  -- db directory (default: $HOME/findb/db)
+               Will not save the file! db_dir is used to find fxdata.
     """
-    store = pd.io.pytables.HDFStore(dbfile, 'a')
-    symloc = "/yahoo/{}".format(symbol)
-    ydata = store[symloc]
-    lastcol = ydata.columns[-1]
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    lastcol = df.columns[-1]
     currency = lastcol[-4:-1]
     if currency == "USD":  # conversion not required
-        store.close()
-        return False
-    fxfile = fred_currencies[currency]
-    fxfileloc = "/fred/{}".format(fxfile)
-    xxxusd = store[fxfileloc]
+        return df
+    try:
+        fxname = fred_currencies[currency]
+    except KeyError:
+        raise FXDataNotFoundException(currency)
+    fxfileloc = os.path.join(db_dir, 'FRED', fxname)
+    fxdata = load_pfile(fxfileloc)
     # fill missing dates (i.e. US holidays) using the last available value
-    xxxusd.fillna(method='ffill')
-    # take inverse of usdxxx pairs (ending "XXUS")
-    if fxfile[-2:] == "US":
-        xxxusd = 1 / xxxusd
-    ydata["AdjClose(USD)"] = ydata[lastcol] * xxxusd
-    store[symloc] = ydata
-    store.close()
+    fxdata = fxdata.fillna(method='ffill')
+    # Seems like division and multiply operators are not thread safe even for read operations!
+    with mylock:
+        # take inverse of usdxxx pairs (ending "XXUS")
+        if fxname[-2:] == "US":
+            fxdata = 1 / fxdata
+    # import threading
+    # tident = hex(threading.current_thread().ident)
+    # pickle.dump([df, fxdata], open('/home/seb/temp/dfdump/{}'.format(tident), 'wb'))
+        df["AdjClose(USD)"] = df[lastcol] * fxdata
+        return df
 
 
-def create_empty_db():
-    """Create empty database directory."""
-    home = os.path.expanduser("~")
-    findbdir = os.path.join(home, 'findb')
-    dbfile = os.path.join(findbdir, 'db.h5')
-    if os.path.isfile(dbfile):
-        raise Exception("{} already exists.".format(dbfile))
-    db = tables.open_file(dbfile, 'w')
-    db.create_group('/', 'yahoo')
-    db.create_group('/', 'fred')
-    db.close()
-
-def download_yahoo(selections, dl_threads, findbdir, batchsize, conv_to_usd=True, modify_groups=False, update_freq=1):
+def download_yahoo(selections, **kwargs):
 
     """Download daily data from Yahoo Finance.
 
-    Arguments:
-    selections       -- symbols or symbol groups to download
-    dl_threads       -- # of threads to use when downloading
-    findbdir         -- database directory
-    batchsize        -- how many symbols to download in one iteration
-                        (bigger number = faster / more memory used)
-    conv_to_usd      -- convert to USD after finished downloading the data
-    modify_groups    -- remove non-existent symbols from yahoogroups.yaml
-    update_freq      -- how many business days to wait until updating data
-    """
+    Returns a list of succesfully processed symbols.
 
+    Arguments:
+    selections       -- Symbols or symbol groups to download
+    dl_threads       -- # of threads to use when downloading (default: 25)
+    findbdir         -- Database directory (default: $HOME/findb)
+    modify_groups    -- Remove non-existent symbols from yahoogroups.yaml.
+                        This is not thread-safe so use carefully when other
+                        processes might access the file simultaneously.
+                        (default: True)
+    update_freq      -- How many business days to wait until updating data
+                        (default: 1)
+    """
+    
+    dl_threads = kwargs.pop('dl_threads', 25)
+    findb_dir = kwargs.pop('findb_dir', default_findb_dir())
+    db_dir = kwargs.pop('db_dir', os.path.join(findb_dir, 'db'))
+    modify_groups = kwargs.pop('modify_groups', False)
+    groups_file = kwargs.pop('groups_file', os.path.join(findb_dir, 'yahoo_groups.yaml'))
+    update_freq = kwargs.pop('update_freq', 1)
+    for kwarg in kwargs:
+        raise Exception("Keyword argument '{}' not supported.".format(kwarg))
     if not selections:
         raise Exception("No symbols selected")
-    for sym in selections:
-        if ".csv" in sym:
-            raise Exception("When downloading select symbol/group names instead of filenames")
+    if type(selections) is str:
+        selections = [selections]
 
-    # if os.path.isfile(os.path.join(findbdir, 'yahoogroups.p')):
-    #     groupfile = os.path.join(findbdir, 'yahoogroups.p')
-    # else:
-    groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
-        # if not os.path.isfile(groupfile):
-        #     with open(groupfile, 'w') as yamlfile:
-        #         yamlfile.write("# empty groupsfile, remove .p cachefile after each write\n")
+    yahoo_dir = os.path.join(db_dir, 'Yahoo')
+    if not os.path.exists(yahoo_dir):
+        os.makedirs(yahoo_dir)
+    fred_dir = os.path.join(db_dir, 'FRED')
+    if not os.path.exists(fred_dir):
+        os.makedirs(fred_dir)
 
-    symbols = findb.selector.selections_to_symbols(selections, groupfile)
+    if os.path.isfile(groups_file):
+        all_symbols = findb.selector.selections_to_symbols(selections, groups_file)
+    else:
+        all_symbols = selections
+    ysd = load_yahoo_sym_data(findb_dir)
+    # filter out bad data (everything should be in sym_data file)
+    good_symbols = list(filter(lambda x: x in ysd.index, all_symbols))
+    diff = set(all_symbols).difference(set(good_symbols))
+    if diff:
+        logging.warning("Symbols not present in yahoo_symbols.csv:\n{}".format(pformat(diff)))
+    if not good_symbols:
+        logging.debug("No symbols to download.")
+        return
+    update_fred_fxdata()
+    l = lambda x: not check_yahoo_uptodate(x, update_freq=update_freq, db_dir=db_dir)
+    symbols_to_dl = list(filter(l, good_symbols))
+    uptodate = set(good_symbols).difference(set(symbols_to_dl))
+    logging.info("{} Yahoo symbols up-to-date, {} to update."
+                 .format(len(uptodate), len(symbols_to_dl)))
+    if not symbols_to_dl:
+        logging.debug("No symbols to download.")
+        return sorted(list(uptodate))
 
-    symbols_to_remove_from_groups = []
+    succesful_symbols = []
+    symbols_without_data = []
+    symbols_without_currency = []
+    symbols_without_fxdata = []
+    symbols_with_invalid_data = []
 
-    results = {}
+    # only need the warning/error messages
+    # if 'urllib3.connectionpool' in logging.Logger.manager.loggerDict:
+    #     lg = logging.Logger.manager.loggerDict['urllib3.connectionpool']
+    #     lg.setLevel(logging.WARNING)
 
-    dbfile = os.path.join(findbdir, 'db.h5')
-    db = tables.open_file(dbfile, 'a')
+    # no more threads than symbols to download to prevent deadlocks
+    num_threads = min(len(symbols_to_dl), dl_threads)
+    yahoodl.configure_downloader(num_threads)
 
-    if not "/yahoo" in db:
-        db.create_group('/', 'yahoo')
+    logging.debug("Starting to download with {} thread(s)...".format(num_threads))
+    start_time = az.utcnow()
+    sym_processed = 0
+    total_processed = 0
+    dlps = dl_and_process_yahoo_symbol  # we need an abbreviation
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        fut_to_sym = {executor.submit(dlps, sym, ysd.loc[sym, 'Currency'], db_dir):
+                      sym for sym in symbols_to_dl}
+        for fut in concurrent.futures.as_completed(fut_to_sym):
+            total_processed += 1
+            sym = fut_to_sym[fut]
+            ex = fut.exception()
+            if ex:
+                logging.debug(ex.__repr__())
+            if not ex:
+                sym_processed += 1
+                succesful_symbols.append(sym)
+            elif type(ex) is yahoodl.YahooDataNotFoundException:
+                symbols_without_data.append(sym)
+            elif type(ex) is yahoodl.CurrencyNotFoundException:
+                symbols_without_currency.append(sym)
+            elif type(ex) is yahoodl.InvalidDataException:
+                symbols_with_invalid_data.append(sym)
+            elif type(ex) is FXDataNotFoundException:
+                symbols_without_fxdata.append(sym)
+            time_elapsed = az.utcnow() - start_time
+            sym_per_sec = total_processed / time_elapsed.total_seconds()
+            progress_str = "{}/{} (suc/total) symbols processed. Speed: {:.2f} symbols/second."\
+                .format(sym_processed, total_processed, sym_per_sec)
+            if total_processed % 500 == 0:
+                logging.info(progress_str)
+            else:
+                logging.debug(progress_str)
+    
+    if symbols_without_data:
+        logging.warning("Symbols without data: \n{}".format(pformat(symbols_without_data)))
+    if symbols_without_currency:
+        logging.warning("Symbols without currency: \n{}".format(pformat(symbols_without_currency)))
+    if symbols_without_currency:
+        logging.warning("Symbols without fxdata: \n{}".format(pformat(symbols_without_fxdata)))
+    if symbols_with_invalid_data:
+        logging.warning("Symbols with invalid data: \n{}"
+                        .format(pformat(symbols_with_invalid_data)))
 
-    symbols_to_fetch = []
-    for sym in symbols:
-        sympath = '/yahoo/{}'.format(sym)
-        if not sympath in db:
-            symbols_to_fetch.append(sym)
-            continue
-        attrs = db.get_node(sympath)._v_attrs
-        if not 'last_update' in attrs:
-            symbols_to_fetch.append(sym)
-            continue
-        # more than one businessday ago
-        if az.utcnow().to_datetime() - pd.tseries.offsets.BDay(update_freq) > attrs['last_update']:
-            symbols_to_fetch.append(sym)
-            continue
-        logging.debug("{} up-to-date, skipping download...".format(sym))
+    progress_str = "{}/{} (suc/total) symbols processed. Speed: {:.2f} symbols/second."\
+        .format(sym_processed, total_processed, sym_per_sec)
+    logging.info(progress_str)
+    if symbols_without_data:
+        logging.warning("{} symbols without data.".format(len(symbols_without_data)))
+    if symbols_without_currency:
+        logging.warning("{} symbols without currency.".format(len(symbols_without_currency)))
+    if symbols_without_fxdata:
+        logging.warning("{} symbols without fxdata.".format(len(symbols_without_fxdata)))
+    if symbols_with_invalid_data:
+        logging.warning("{} symbols with invalid data.".format(len(symbols_with_invalid_data)))
 
-    db.close()
+    if modify_groups and os.path.isfile(groups_file) and symbols_without_data:
+        logging.warning("Removing {} symbols without data from {} ..."
+                        .format(len(symbols_without_data), groups_file))
+        with open(groups_file, mode='r') as myfile:
+            lines = myfile.readlines()
+        for symbol in symbols_without_data:
+            lam = lambda x: not re.search('[\'"]{}[\'"]'.format(symbol), x)
+            lines = list(filter(lam, lines))
+            # for i in range(len(lines) - 1, -1, -1):
+            #     if re.match('[\'"]{}[\'"]'.format(symbol), lines[i]
+            #         del lines[i]
+            #         # logging.info("Removed {} from line {}.".format(symbol, i))
+        with open(groups_file, mode='w') as myfile:
+            myfile.writelines(lines)
 
-    # pd_est_now = pd.Timestamp(datetime.utcnow(), tz='UTC').tz_convert('US/Eastern')
-    # est_now = pd_est_now.to_datetime()
+    return sorted(list(set(succesful_symbols).union(uptodate)))
 
-    fred_symbols_to_dl = []
-    if conv_to_usd:
-        db = tables.open_file(dbfile, 'a')
-        if not '/fred' in db:
-            db.create_group('/', 'fred')
-
-        for sym in fred_currencies.values():
-            sympath = '/fred/{}'.format(sym)
-            if not sympath in db:
-                fred_symbols_to_dl.append(sym)
-                continue
-            attrs = db.get_node(sympath)._v_attrs
-            if not 'last_update' in attrs:
-                fred_symbols_to_dl.append(sym)
-                continue
-            # more than one businessday ago
-            if az.utcnow().to_datetime() - pd.tseries.offsets.BDay(1) > attrs['last_update']:
-                fred_symbols_to_dl.append(sym)
-                continue
-            logging.debug("{} up-to-date, skipping download...".format(sym))
-
-        db.close()
-
-        if fred_symbols_to_dl:
-            # download fx-rates from fred
-            start = datetime(1900, 1, 1)
-            end = datetime(2020, 1, 1)
-            logging.info("Downloading fx-data from FRED...")
-            fxdata = pandas.io.data.DataReader(fred_symbols_to_dl, 'fred', start, end)
-            logging.debug("Saving fx-data to HDF file...")
-            for sym in fred_symbols_to_dl:
-                fxdata[sym].to_hdf(dbfile, '/fred/{}'.format(sym))
-            logging.debug("Updating timestamps in HDF file...")
-
-            db = tables.open_file(dbfile, 'a')
-            for sym in fred_symbols_to_dl:
-                attrs = db.get_node('/fred/{}'.format(sym))._v_attrs
-                attrs['last_update'] = az.utcnow().to_datetime()
-            db.close()
-            logging.debug("fx-data from FRED saved to HDF-file.")
-
-    downloaded_symbols = []
-
-    num_batches = len(list(az.chunks(symbols_to_fetch, batchsize)))
-    batch_no = 1
-    for batch in az.chunks(symbols_to_fetch, batchsize):
-
-        results = {}
-        # grab the data from Yahoo with multiple threads
-        with concurrent.futures.ThreadPoolExecutor(max_workers=dl_threads) as executor:
-            future_to_symbol = {executor.submit(yahoodl.dl, sym): sym for sym in batch}
-            for future in concurrent.futures.as_completed(future_to_symbol):
-                symbol = future_to_symbol[future]
-                # try:
-                res = future.result()
-                # except Exception as err:
-                #     logging.error("Error when processing {}: {}".format(symbol, err))
-                #     results[symbol] = err
-                if res:
-                    # dates should be in ascending order, faster than reindexing DataFrame later
-                    lines = res.splitlines()
-                    header = lines[0]
-                    del lines[0]
-                    lines.reverse()
-                    lines.insert(0, header)
-                    res = "\n".join(lines)
-
-                    results[symbol] = res
-                    downloaded_symbols.append(symbol)
-                    logging.debug("Downloaded {} from Yahoo succesfully.".format(symbol))
-                else:
-                    # logging.debug("{} was not found.".format(symbol))
-                    symbols_to_remove_from_groups.append(symbol)
-
-        logging.debug("Saving batch data to the HDF-file...")
-        for sym, res in results.items():
-            df = DataFrame.from_csv(io.StringIO(res))
-            # very rarely this will fail for some reason! (for example on CANCDA.SW)
-            # have to report this bug (or maybe it was corrupted db file)
-            df.to_hdf(dbfile, '/yahoo/{}'.format(sym))
-
-        logging.debug("Updating timestamps on the HDF-file...")
-        db = tables.open_file(dbfile, 'a')
-        for sym, res in results.items():
-            targetloc = '/yahoo/{}'.format(sym)
-            if targetloc in db:
-                attrs = db.get_node(targetloc)._v_attrs
-                attrs['last_update'] = az.utcnow().to_datetime()
-        db.close()
-        logging.debug("Data succesfully saved to the HDF-file.")
-
-        if modify_groups and os.path.isfile(groupfile) and symbols_to_remove_from_groups:
-            logging.info("Removing invalid symbols from {} ...".format(groupfile))
-            with open(groupfile, mode='r') as myfile:
-                lines = myfile.readlines()
-            for symbol in symbols_to_remove_from_groups:
-                for i in range(len(lines) - 1, -1, -1):
-                    matches = re.search('[\'"]{}[\'"]'.format(symbol), lines[i])
-                    if matches:
-                        del lines[i]
-                        logging.info("Removed {} from line {}.".format(symbol, i))
-            with open(groupfile, mode='w') as myfile:
-                myfile.writelines(lines)
-
-        if conv_to_usd:
-            logging.debug("Converting to USD...")
-            for sym in results:
-                convert_to_usd(sym, dbfile)
-            logging.debug("Succesfully converted to USD.")
-
-        if num_batches > 1:
-            logging.info("Finished downloading batch {}/{}.".format(batch_no, num_batches))
-        batch_no += 1
-
-    return downloaded_symbols
 
 def change_to_score(change):
     """Create a change-score out of a return 'change'
@@ -288,12 +384,12 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
     df = df.dropna()
 
     if len(df) < 50:
-        return None, "Not enough data"
+        raise DeltaConversionException("Not enough data")
 
     lines_taken = 0
 
     if df.index[0] > df.index[-1]:
-        return None, "Wrong cronological order"
+        raise DeltaConversionException("Wrong cronological order")
 
     # closes = []
     # dates = []
@@ -490,8 +586,8 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
                 logging.log(5, "Weekly bar at {} skipped (delta: {} days)".format(datesmod[i], i, dd))
             lastidx = i
 
-    res_daily = Series(deltapctmod, datesmod)
-    res_weekly = Series(weeklydeltapct, weeklydatesmod)
+    res_daily = pd.Series(deltapctmod, datesmod)
+    res_weekly = pd.Series(weeklydeltapct, weeklydatesmod)
 
 
     indices_to_rem = list(set(confirmed_outliers + invalid_price_indices))
@@ -500,12 +596,81 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
     deltapctmod = np.delete(deltapct, indices_to_rem)
     assert(not np.any(np.isnan(deltapctmod[1:])))
 
-    res_dailyscore = Series(deltapctmod, datesmod)
+    res_dailyscore = pd.Series(deltapctmod, datesmod)
 
-    return (res_daily, res_weekly, res_dailyscore), None
+    return res_daily, res_weekly, res_dailyscore
 
 
-def fetch_deltas(selections, findbdir=None, visualize=False):
+def check_delta_uptodate(sym, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    yahoo_dir = os.path.join(db_dir, 'Yahoo')
+    symloc = os.path.join(yahoo_dir, sym)
+    dloc = symloc + '~D'
+    wloc = symloc + '~W'
+    dsloc = symloc + '~DS'
+    if not os.path.isfile(dloc) or not os.path.isfile(wloc) or not os.path.isfile(dsloc):
+        return False
+    try:
+        source_sha1 = pickle.load(open(symloc, 'rb'))['sha1']
+    except EOFError as err:
+        os.remove(symloc)
+        logging.info("Removed corrupted file from db ({}): {!r}".format(symloc, err))
+        return False
+    try:
+        if pickle.load(open(dloc, 'rb'))['source_sha1'] != source_sha1:
+            return False
+        if pickle.load(open(wloc, 'rb'))['source_sha1'] != source_sha1:
+            return False
+        if pickle.load(open(dsloc, 'rb'))['source_sha1'] != source_sha1:
+            return False
+    except EOFError as err:
+        if os.path.isfile(dloc):
+            os.remove(dloc)
+        if os.path.isfile(wloc):
+            os.remove(wloc)
+        if os.path.isfile(dsloc):
+            os.remove(dsloc)
+        logging.info("Removed corrupted delta files for symbol {}: {!r}".format(sym, err))
+        return False
+    return True
+
+
+def save_deltas(data, sym, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    yahoo_dir = os.path.join(db_dir, 'Yahoo')
+    symloc = os.path.join(yahoo_dir, sym)
+    dloc = symloc + '~D'
+    wloc = symloc + '~W'
+    dsloc = symloc + '~DS'
+    source_sha1 = pickle.load(open(symloc, 'rb'))['sha1']
+    d_data = {'source_sha1': source_sha1, 'data': data[0]}
+    w_data = {'source_sha1': source_sha1, 'data': data[1]}
+    ds_data = {'source_sha1': source_sha1, 'data': data[2]}
+    pickle.dump(d_data, open(dloc, 'wb'))
+    pickle.dump(w_data, open(wloc, 'wb'))
+    pickle.dump(ds_data, open(dsloc, 'wb'))
+
+
+def save_invalid_deltas(sym, err, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    yahoo_dir = os.path.join(db_dir, 'Yahoo')
+    symloc = os.path.join(yahoo_dir, sym)
+    dloc = symloc + '~D'
+    wloc = symloc + '~W'
+    dsloc = symloc + '~DS'
+    source_sha1 = pickle.load(open(symloc, 'rb'))['sha1']
+    d_data = {'source_sha1': source_sha1, 'data': None, 'error': err}
+    w_data = {'source_sha1': source_sha1, 'data': None, 'error': err}
+    ds_data = {'source_sha1': source_sha1, 'data': None, 'error': err}
+    pickle.dump(d_data, open(dloc, 'wb'))
+    pickle.dump(w_data, open(wloc, 'wb'))
+    pickle.dump(ds_data, open(dsloc, 'wb'))
+
+
+def fetch_deltas(selections, findb_dir=None, visualize=False, groups_file=None):
 
     """Fetch deltas for the given selections (yahoo) and save to HDF-database.
 
@@ -515,58 +680,64 @@ def fetch_deltas(selections, findbdir=None, visualize=False):
     visualize   -- visualize results
     """
 
-    if not findbdir:
-        home = os.path.expanduser("~")
-        findbdir = os.path.join(home, 'findb')
+    if type(selections) is str:
+        selections = [selections]
 
-    groupfile = os.path.join(findbdir, 'yahoogroups.yaml')
-    symbols = findb.selector.selections_to_symbols(selections, groupfile)
+    if not findb_dir:
+        findb_dir = default_findb_dir()
 
-    dbfile = os.path.join(findbdir, 'db.h5')
-    for sym in symbols:
-        store = pd.io.pytables.HDFStore(dbfile, 'r')
-        symloc = "/yahoo/{}".format(sym)
-        if symloc not in store:
-            store.close()
-            logging.debug("{} was not found in HDS-file, skipping...".format(sym))
-            continue
-        dloc = '/yahoo/{}_D'.format(sym)
-        wloc = '/yahoo/{}_W'.format(sym)
-        dsloc = '/yahoo/{}_DS'.format(sym)
-        underlying_sha1 = hashlib.sha1(pickle.dumps(store[symloc])).digest()
-        db = tables.open_file(dbfile, 'r')
-        delta_calculation_needed = False
-        if not dloc in db or "underlying_sha1" not in db.get_node(dloc)._v_attrs or \
-                        underlying_sha1 != db.get_node(dloc)._v_attrs["underlying_sha1"]:
-            delta_calculation_needed = True
-        if not wloc in db or "underlying_sha1" not in db.get_node(wloc)._v_attrs or \
-                        underlying_sha1 != db.get_node(wloc)._v_attrs["underlying_sha1"]:
-            delta_calculation_needed = True
-        if not dsloc in db or "underlying_sha1" not in db.get_node(dsloc)._v_attrs or \
-                        underlying_sha1 != db.get_node(dsloc)._v_attrs["underlying_sha1"]:
-            delta_calculation_needed = True
-        db.close()
-        store.close()
-        if delta_calculation_needed:
-            store = pd.io.pytables.HDFStore(dbfile, 'a')
-            logging.debug("Performing delta-conversion to {}...".format(sym))
-            res, err = deltaconvert(store[symloc], -1, visualize)
-            if res:
-                store[dloc] = res[0]
-                store[wloc] = res[1]
-                store[dsloc] = res[2]
-                store.close()
-                db = tables.open_file(dbfile, 'a')
-                db.get_node(dloc)._v_attrs["underlying_sha1"] = underlying_sha1
-                db.get_node(wloc)._v_attrs["underlying_sha1"] = underlying_sha1
-                db.get_node(dsloc)._v_attrs["underlying_sha1"] = underlying_sha1
-                db.close()
-                logging.info("Delta-conversion for {} finished.".format(sym))
-            else:
-                store.close()
-                logging.warning("Error when delta-converting {}: {}".format(sym, err))
+    if not groups_file:
+        groups_file = os.path.join(findb_dir, 'yahoo_groups.yaml')
+
+    if os.path.isfile(groups_file):
+        all_symbols = findb.selector.selections_to_symbols(selections, groups_file)
+    else:
+        all_symbols = selections
+    
+    db_dir = os.path.join(findb_dir, 'db')
+    existing_symbols = list(filter(lambda x: symbol_in_db(x, db_dir), all_symbols))
+    diff = set(all_symbols).difference(set(existing_symbols))
+    if diff:
+        logging.info("{} of the requested symbols do not exist in the db.".format(len(diff)))
+    deltas_to_calc = list(filter(lambda x: not check_delta_uptodate(x, db_dir),
+                                 existing_symbols))
+    calculated_deltas = set(existing_symbols).difference(set(deltas_to_calc))
+    if not deltas_to_calc:
+        logging.info("All the deltas have already been calculated.")
+        return sorted(list(calculated_deltas))
+    logging.info("{} symbols already have deltas, {} to new deltas to calculate."
+                 .format(len(existing_symbols) - len(deltas_to_calc), len(deltas_to_calc)))
+    yahoo_dir = os.path.join(db_dir, 'Yahoo')
+
+    start_time = az.utcnow()
+    total_processed = 0
+    succesful_conversions = []
+    for sym in deltas_to_calc:
+        symloc = os.path.join(yahoo_dir, sym)
+        df = load_pfile(symloc)
+        logging.debug("Delta-converting {}...".format(sym))
+        try:
+            res = deltaconvert(df)
+            succesful_conversions.append(sym)
+            save_deltas(res, sym, db_dir=db_dir)
+        except DeltaConversionException as err:
+            logging.debug("{}: {!r}".format(sym, err))
+            save_invalid_deltas(sym, err.args[0], db_dir=db_dir)
+        total_processed += 1
+        time_elapsed = az.utcnow() - start_time
+        sym_per_sec = total_processed / time_elapsed.total_seconds()
+        progress_str = "{}/{} (suc/total) symbols processed. Speed: {:.2f} symbols/second."\
+            .format(len(succesful_conversions), total_processed, sym_per_sec)
+        if total_processed % 500 == 0:
+            logging.info(progress_str)
         else:
-            logging.debug("Delta-conversion not needed for {}.".format(sym))
+            logging.debug(progress_str)
+
+    progress_str = "{}/{} (suc/total) symbols processed. Speed: {:.2f} symbols/second."\
+        .format(len(succesful_conversions), total_processed, sym_per_sec)
+    logging.info(progress_str)
+
+    return sorted(list(set(succesful_conversions).union(calculated_deltas)))
 
 
 if __name__ == "__main__":
@@ -582,26 +753,27 @@ if __name__ == "__main__":
     parser.add_argument("--provider", default="yahoo", choices=["yahoo", "eia"], help="data provider")
     parser.add_argument("--modifygroups", action="store_true",
                         help="allow script to remove non-available entries from groups-file")
-    parser.add_argument("--dlthreads", type=int, default=5, help="number of threads to use to download data")
+    parser.add_argument("--dl_threads", type=int, default=5, help="number of threads to use to download data")
     parser.add_argument("-dl", action="store_true", help="download data")
     parser.add_argument("-usd", action="store_true", help="convert data to USD")
     parser.add_argument("-delta", action="store_true", help="calculate changes")
     parser.add_argument("--visualize", action="store_true", help="visualize delta-conversion")
-    parser.add_argument("--batchsize", type=int, default=100, help="number of downloads per batch")
 
     args = parser.parse_args()
 
-    az.azlogging.quick_config(args.v, args.quiet)
+    azlib.azlogging.quick_config(args.v, args.quiet)
+    
+    # this old code is not up-to-date
 
-    home = os.path.expanduser("~")
-    findbdir = os.path.join(home, 'findb')
-    if not os.path.exists(findbdir):
-        os.makedirs(findbdir)
+    # home = os.path.expanduser("~")
+    # findbdir = os.path.join(home, 'findb')
+    # if not os.path.exists(findbdir):
+    #     os.makedirs(findbdir)
 
-    symbols = []
-    if args.dl and args.provider == "yahoo":
-        # symbols not assigned on purpose
-        download_yahoo(args.selections, args.dlthreads, findbdir, args.batchsize, args.usd, args.modifygroups)
+    # symbols = []
+    # if args.dl and args.provider == "yahoo":
+    #     # symbols not assigned on purpose
+    #     download_yahoo(args.selections, args.dl_threads, findbdir, args.batchsize, args.usd, args.modifygroups)
 
-    if args.delta:
-        fetch_deltas(args.selections, findbdir, args.visualize)
+    # if args.delta:
+    #     fetch_deltas(args.selections, findbdir, args.visualize)
