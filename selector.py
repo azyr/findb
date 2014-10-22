@@ -1,13 +1,17 @@
 import logging
 import os.path
 import pickle
-import hashlib
+# import hashlib
 import azlib as az
 import findb.manipulator
-import yaml
+# import yaml
 
 
-def read_groups(groupsfile):
+class ParseException(Exception):
+    pass
+
+
+def read_groups(shortcuts_file):
     """Read groupfile. Return a dictionary.
 
     Return a dictionary where key is the group name and value
@@ -18,46 +22,68 @@ def read_groups(groupsfile):
     Arguments:
     groupsfile -- name of the groupsfile to read (yaml-file)
     """
+    with open(shortcuts_file, mode='r') as scfile:
+        lines = scfile.readlines()
+    res = {}
+    groupnow = None
+    for i in range(len(lines)):
+        line = lines[i].strip()
+        if not line:
+            continue
+        if line[0] == "#":  # comment line
+            continue
+        if line[0] == "/":
+            line = line[1:]
+        if len(line) == 0:
+            continue
+        if line[-1] == ":":  # group definition
+            groupnow = line[:-1]
+            res[groupnow] = []
+            continue
+        if '/' not in line:
+            raise ParseException("{}:{}: Data Provider not defined"
+                                 .format(shortcuts_file, i + 1))
+        res[groupnow].append(line)
+    return res
+    # try:
+    #     with open(groupsfile, mode='rb') as myfile:
+    #         sha = hashlib.sha1(myfile.read())
+    #         groupshash = sha.digest()
+    # except FileNotFoundError:
+    #     pass
 
-    try:
-        with open(groupsfile, mode='rb') as myfile:
-            sha = hashlib.sha1(myfile.read())
-            groupshash = sha.digest()
-    except FileNotFoundError:
-        pass
+    # splitted = groupsfile.split(".")
+    # cachefile = splitted[0] + ".p"
+    # if os.path.isfile(cachefile):
+    #     fromcache = pickle.load(open(cachefile, 'rb'))
+    #     if groupshash and groupshash == fromcache["__SHA1__"]:
+    #         del fromcache["__SHA1__"]
+    #         return fromcache
+    #     elif not groupshash:
+    #         logging.warning("{} not found, using cachefile {}".format(groupsfile, cachefile))
+    # # if ".yaml" in groupsfile:
+    # # logging.debug("Reading symbol group definitions from {}...".format(groupsfile))
+    # sym_groups = {}
+    # if not groupshash:
+    #     logging.warning("{} file not found, no symbol groups defined ...".format(groupsfile))
+    #     return sym_groups
 
-    splitted = groupsfile.split(".")
-    cachefile = splitted[0] + ".p"
-    if os.path.isfile(cachefile):
-        fromcache = pickle.load(open(cachefile, 'rb'))
-        if groupshash and groupshash == fromcache["__SHA1__"]:
-            del fromcache["__SHA1__"]
-            return fromcache
-        elif not groupshash:
-            logging.warning("{} not found, using cachefile {}".format(groupsfile, cachefile))
-    # if ".yaml" in groupsfile:
-    # logging.debug("Reading symbol group definitions from {}...".format(groupsfile))
-    sym_groups = {}
-    if not groupshash:
-        logging.warning("{} file not found, no symbol groups defined ...".format(groupsfile))
-        return sym_groups
+    # with open(groupsfile, mode='r') as myfile:
+    #     logging.debug("Reading groups from non-cached {}...".format(groupsfile))
+    #     data = yaml.load(myfile)
+    #     if data:
+    #         for k, v in data.items():
+    #             sym_groups[k] = v
 
-    with open(groupsfile, mode='r') as myfile:
-        logging.debug("Reading groups from non-cached {}...".format(groupsfile))
-        data = yaml.load(myfile)
-        if data:
-            for k, v in data.items():
-                sym_groups[k] = v
-
-    sym_groups["__SHA1__"] = groupshash
-    pickle.dump(sym_groups, open(cachefile, 'wb'))
-    del sym_groups["__SHA1__"]
-    return sym_groups
-    # else:
-    #     return pickle.load(open(groupsfile, 'rb'))
+    # sym_groups["__SHA1__"] = groupshash
+    # pickle.dump(sym_groups, open(cachefile, 'wb'))
+    # del sym_groups["__SHA1__"]
+    # return sym_groups
+    # # else:
+    # #     return pickle.load(open(groupsfile, 'rb'))
 
 
-def selections_to_symbols(selections, groupsfile=None):
+def selections_to_symbols(selections, shortcuts_file=None):
     """Use globber patterns to select symbols/groups.
 
     Use globber pattern(s) to match against group definitions
@@ -68,16 +94,15 @@ def selections_to_symbols(selections, groupsfile=None):
     selections   -- list of globber patterns
     groupsfile   -- groups will be read from this (yaml) file
     """
-
     if type(selections) is str:
         selections = [selections]
 
-    if not groupsfile:
+    if not shortcuts_file:
         home = os.path.expanduser("~")
         findbdir = os.path.join(home, 'findb')
-        groupsfile = os.path.join(findbdir, 'yahoo_groups.yaml')
+        shortcuts_file = os.path.join(findbdir, 'shortcuts.conf')
 
-    sym_groups = read_groups(groupsfile)
+    sym_groups = read_groups(shortcuts_file)
 
     symbols = []
     groups_selected = []
@@ -137,8 +162,8 @@ def get_yahoo_bars(selections, bartype="", **kwargs):
 
     if fetch_missing:
         selections = findb.manipulator.download_yahoo(selections, findb_dir=findb_dir,
-                                                          update_freq=update_freq, 
-                                                          dl_threads=dl_threads)
+                                                      update_freq=update_freq, 
+                                                      dl_threads=dl_threads)
         if bartype:
             selections = findb.manipulator.fetch_deltas(selections, findb_dir=findb_dir)
     else:
@@ -152,4 +177,71 @@ def get_yahoo_bars(selections, bartype="", **kwargs):
         if data is not None:
             res[sym] = data
 
+    return res
+
+
+def get_data(selections, datatype="C", **kwargs):
+    """Generic fetcher"""
+    fetch_missing = kwargs.pop("fetch_missing", True)
+    dl_threads = kwargs.pop("dl_threads", 5)
+    update_freq = kwargs.pop("update_freq", 1)
+    findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
+    shortcuts_file = kwargs.pop('shortcuts_file', os.path.join(findb_dir, 'shortcuts.conf'))
+    for kwarg in kwargs:
+        raise Exception("Keyword argument '{}' not supported.".format(kwarg))
+    db_dir = os.path.join(findb_dir, 'db')
+    delta_conv = False
+    if datatype == "C":
+        suffix = ""
+    elif datatype == "A":
+        suffix = ""
+    elif datatype == "D":
+        suffix = "~D"
+        delta_conv = True
+    elif datatype == "W":
+        suffix = "~W"
+        delta_conv = True
+    elif datatype == "DS":
+        suffix = "~DS"
+        delta_conv = True
+    else:
+        raise Exception('Datatype "{}" is not supported.'.format(datatype))
+    if fetch_missing:
+        symbols = findb.manipulator.download_data(selections,
+                                                  delta_convert=delta_conv,
+                                                  dl_threads=dl_threads,
+                                                  update_freq=update_freq,
+                                                  findb_dir=findb_dir,
+                                                  shortcuts_file=shortcuts_file)[1]
+    else:
+        symbols = selections_to_symbols(selections, shortcuts_file)
+    res = {}
+    for sym in symbols:
+        if not findb.manipulator.symbol_in_db(sym, db_dir):
+            continue
+        fpath = os.path.join(db_dir, sym + suffix)
+        if not os.path.isfile(fpath):
+            continue
+        data = pickle.load(open(fpath, 'rb'))['data']
+        if data is not None:
+            splitted = sym.split('/')
+            if datatype == "C":
+                data_provider = splitted[0]
+                if data_provider == "Yahoo":
+                    col = "AdjClose(USD)"
+                elif data_provider == "Quandl":
+                    assert len(splitted) >= 3
+                    qdl_db = splitted[1]
+                    if qdl_db == "WIKI":
+                        col = "Adj. Close"
+                    elif qdl_db == "BAVERAGE":
+                        col = "24h Average"
+                    else:
+                        raise Exception("Quantdl database '{}' => unknown close column"
+                                        .format(qdl_db))
+                else:
+                    raise Exception("Unknown data provider: {}".format(data_provider))
+                res[sym] = data[col]
+            else:
+                res[sym] = data
     return res

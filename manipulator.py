@@ -1,13 +1,14 @@
 import argparse
 import logging
 import os
-import re
 import concurrent.futures
 import yahoodl
+import Quandl
 import hashlib
 import pickle
 import threading
 import os.path
+import findb.selector
 import azlib as az
 import azlib.azlogging
 import pandas as pd
@@ -15,7 +16,6 @@ import pandas.tseries.offsets
 import pandas.io.data
 import bottleneck as bn
 import numpy as np
-import findb.selector
 from datetime import datetime
 from pprint import pformat
 
@@ -106,10 +106,17 @@ def check_yahoo_uptodate(sym, update_freq=1, db_dir=None):
     return check_pfile_uptodate(filepath, update_freq)
 
 
+def check_quandl_uptodate(sym, update_freq=1, db_dir=None):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    filepath = os.path.join(db_dir, 'Quandl', sym)
+    return check_pfile_uptodate(filepath, update_freq)
+
+
 def symbol_in_db(sym, db_dir=None):
     if not db_dir:
         db_dir = os.path.join(default_findb_dir(), 'db')
-    filepath = os.path.join(db_dir, 'Yahoo', sym)
+    filepath = os.path.join(db_dir, sym)
     return os.path.isfile(filepath)
 
 
@@ -121,6 +128,18 @@ def dl_and_process_yahoo_symbol(sym, currency=None, db_dir=None):
     df = yahoodl.dl(sym, currency)
     df = df.copy()
     df = convert_to_usd(df, db_dir)
+    save_pfile(df, fpath, save_hash=True)
+
+
+def dl_and_process_quandl_symbol(sym, db_dir=None, authtoken=""):
+    if not db_dir:
+        db_dir = os.path.join(default_findb_dir(), 'db')
+    quandl_dir = os.path.join(db_dir, 'Quandl')
+    fpath = os.path.join(quandl_dir, sym)
+    df = Quandl.get(sym, authtoken=authtoken)
+    dirname = os.path.dirname(fpath)
+    if not os.path.exists(dirname):
+        os.makedirs(dirname)
     save_pfile(df, fpath, save_hash=True)
 
 
@@ -186,6 +205,47 @@ def convert_to_usd(df, db_dir=None):
         return df
 
 
+def strip_data_provider(sym, provider):
+    try:
+        return sym[sym.index(provider + '/') + len(provider) + 1:]
+    except ValueError:
+        return sym
+
+
+def download_data(selections, **kwargs):
+    """Generic fetcher"""
+    delta_convert = kwargs.pop("delta_convert", True)
+    dl_threads = kwargs.pop("dl_threads", 5)
+    update_freq = kwargs.pop("update_freq", 1)
+    findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
+    shortcuts_file = kwargs.pop('shortcuts_file', os.path.join(findb_dir, 'shortcuts.conf'))
+    for kwarg in kwargs:
+        raise Exception("Keyword argument '{}' not supported.".format(kwarg))
+
+    symbols = findb.selector.selections_to_symbols(selections, shortcuts_file)
+    yahoo_symbols = [s for s in symbols if s.find('Yahoo/') == 0]
+    quandl_symbols = [s for s in symbols if s.find('Quandl/') == 0]
+    downloaded = set()
+    if yahoo_symbols:
+        yres = findb.manipulator.download_yahoo(yahoo_symbols, findb_dir=findb_dir,
+                                                update_freq=update_freq,
+                                                dl_threads=dl_threads)
+        yres = ["Yahoo/" + s for s in yres]
+        downloaded = downloaded.union(set(yres))
+    if quandl_symbols:
+        auth_token = "irmSGyQoEh7gZd2SuYML"
+        qres = findb.manipulator.download_quandl(quandl_symbols, findb_dir=findb_dir,
+                                                 update_freq=update_freq,
+                                                 dl_threads=dl_threads,
+                                                 auth_token=auth_token)
+        qres = ["Quandl/" + s for s in qres]
+        downloaded = downloaded.union(set(qres))
+    converted = downloaded
+    if delta_convert:
+        converted = fetch_deltas(downloaded, findb_dir=findb_dir)
+    return downloaded, converted
+
+
 def download_yahoo(selections, **kwargs):
 
     """Download daily data from Yahoo Finance.
@@ -203,12 +263,10 @@ def download_yahoo(selections, **kwargs):
     update_freq      -- How many business days to wait until updating data
                         (default: 1)
     """
-    
+
     dl_threads = kwargs.pop('dl_threads', 25)
     findb_dir = kwargs.pop('findb_dir', default_findb_dir())
     db_dir = kwargs.pop('db_dir', os.path.join(findb_dir, 'db'))
-    modify_groups = kwargs.pop('modify_groups', False)
-    groups_file = kwargs.pop('groups_file', os.path.join(findb_dir, 'yahoo_groups.yaml'))
     update_freq = kwargs.pop('update_freq', 1)
     for kwarg in kwargs:
         raise Exception("Keyword argument '{}' not supported.".format(kwarg))
@@ -224,10 +282,7 @@ def download_yahoo(selections, **kwargs):
     if not os.path.exists(fred_dir):
         os.makedirs(fred_dir)
 
-    if os.path.isfile(groups_file):
-        all_symbols = findb.selector.selections_to_symbols(selections, groups_file)
-    else:
-        all_symbols = selections
+    all_symbols = [strip_data_provider(x, "Yahoo") for x in selections]
     ysd = load_yahoo_sym_data(findb_dir)
     # filter out bad data (everything should be in sym_data file)
     good_symbols = list(filter(lambda x: x in ysd.index, all_symbols))
@@ -254,9 +309,9 @@ def download_yahoo(selections, **kwargs):
     symbols_with_invalid_data = []
 
     # only need the warning/error messages
-    # if 'urllib3.connectionpool' in logging.Logger.manager.loggerDict:
-    #     lg = logging.Logger.manager.loggerDict['urllib3.connectionpool']
-    #     lg.setLevel(logging.WARNING)
+    if 'urllib3.connectionpool' in logging.Logger.manager.loggerDict:
+        lg = logging.Logger.manager.loggerDict['urllib3.connectionpool']
+        lg.setLevel(logging.WARNING)
 
     # no more threads than symbols to download to prevent deadlocks
     num_threads = min(len(symbols_to_dl), dl_threads)
@@ -295,7 +350,7 @@ def download_yahoo(selections, **kwargs):
                 logging.info(progress_str)
             else:
                 logging.debug(progress_str)
-    
+
     if symbols_without_data:
         logging.warning("Symbols without data: \n{}".format(pformat(symbols_without_data)))
     if symbols_without_currency:
@@ -318,20 +373,119 @@ def download_yahoo(selections, **kwargs):
     if symbols_with_invalid_data:
         logging.warning("{} symbols with invalid data.".format(len(symbols_with_invalid_data)))
 
-    if modify_groups and os.path.isfile(groups_file) and symbols_without_data:
-        logging.warning("Removing {} symbols without data from {} ..."
-                        .format(len(symbols_without_data), groups_file))
-        with open(groups_file, mode='r') as myfile:
-            lines = myfile.readlines()
-        for symbol in symbols_without_data:
-            lam = lambda x: not re.search('[\'"]{}[\'"]'.format(symbol), x)
-            lines = list(filter(lam, lines))
-            # for i in range(len(lines) - 1, -1, -1):
-            #     if re.match('[\'"]{}[\'"]'.format(symbol), lines[i]
-            #         del lines[i]
-            #         # logging.info("Removed {} from line {}.".format(symbol, i))
-        with open(groups_file, mode='w') as myfile:
-            myfile.writelines(lines)
+    # if modify_groups and os.path.isfile(groups_file) and symbols_without_data:
+    #     logging.warning("Removing {} symbols without data from {} ..."
+    #                     .format(len(symbols_without_data), groups_file))
+    #     with open(groups_file, mode='r') as myfile:
+    #         lines = myfile.readlines()
+    #     for symbol in symbols_without_data:
+    #         lam = lambda x: not re.search('[\'"]{}[\'"]'.format(symbol), x)
+    #         lines = list(filter(lam, lines))
+    #         # for i in range(len(lines) - 1, -1, -1):
+    #         #     if re.match('[\'"]{}[\'"]'.format(symbol), lines[i]
+    #         #         del lines[i]
+    #         #         # logging.info("Removed {} from line {}.".format(symbol, i))
+    #     with open(groups_file, mode='w') as myfile:
+    #         myfile.writelines(lines)
+
+    return sorted(list(set(succesful_symbols).union(uptodate)))
+
+
+def download_quandl(selections, **kwargs):
+
+    """Download daily data from Quandl.
+
+    Returns a list of succesfully processed symbols.
+
+    Arguments:
+    selections       -- Symbols or symbol groups to download
+    dl_threads       -- # of threads to use when downloading (default: 25)
+    findbdir         -- Database directory (default: $HOME/findb)
+    update_freq      -- How many business days to wait until updating data
+                        (default: 1)
+    auth_token       -- Authentication token for Quandl
+    """
+
+    dl_threads = kwargs.pop('dl_threads', 25)
+    findb_dir = kwargs.pop('findb_dir', default_findb_dir())
+    db_dir = kwargs.pop('db_dir', os.path.join(findb_dir, 'db'))
+    update_freq = kwargs.pop('update_freq', 1)
+    auth_token = kwargs.pop('auth_token', '')
+    for kwarg in kwargs:
+        raise Exception("Keyword argument '{}' not supported.".format(kwarg))
+    if not selections:
+        raise Exception("No symbols selected")
+    if type(selections) is str:
+        selections = [selections]
+
+    quandl_dir = os.path.join(db_dir, 'Quandl')
+    if not os.path.exists(quandl_dir):
+        os.makedirs(quandl_dir)
+
+    all_symbols = [strip_data_provider(x, "Quandl") for x in selections]
+    l = lambda x: not check_quandl_uptodate(x, update_freq=update_freq, db_dir=db_dir)
+    symbols_to_dl = list(filter(l, all_symbols))
+    uptodate = set(all_symbols).difference(set(symbols_to_dl))
+    logging.info("{} Quandl symbols up-to-date, {} to update."
+                 .format(len(uptodate), len(symbols_to_dl)))
+    if not symbols_to_dl:
+        logging.debug("No symbols to download.")
+        return sorted(list(uptodate))
+
+    succesful_symbols = []
+    symbols_without_data = []
+
+    # no more threads than symbols to download to prevent deadlocks
+    num_threads = min(len(symbols_to_dl), dl_threads)
+
+    logging.debug("Starting to download with {} thread(s)...".format(num_threads))
+    start_time = az.utcnow()
+    sym_processed = 0
+    total_processed = 0
+    dlps = dl_and_process_quandl_symbol  # we need an abbreviation
+    with concurrent.futures.ThreadPoolExecutor(max_workers=num_threads) as executor:
+        fut_to_sym = {executor.submit(dlps, sym, db_dir, auth_token):
+                      sym for sym in symbols_to_dl}
+        for fut in concurrent.futures.as_completed(fut_to_sym):
+            total_processed += 1
+            sym = fut_to_sym[fut]
+            ex = fut.exception()
+            if ex:
+                logging.debug(ex.__repr__())
+            if not ex:
+                sym_processed += 1
+                succesful_symbols.append(sym)
+            elif type(ex) is Quandl.Quandl.DatasetNotFound:
+                symbols_without_data.append(sym)
+            elif type(ex) is Quandl.Quandl.CallLimitExceeded:
+                # sometimes this exception is thrown when data just
+                # simple doesn't exist! don't take it seriously ...
+                symbols_without_data.append(sym)
+                # logging.warning("Cancelling download because" + 
+                #                 " daily limit has been exceeded.")
+                # for fut in fut_to_sym:
+                #     try:
+                #         fut.cancel()
+                #     except concurrent.futures.CancelledError:
+                #         logging.debug("{} cancelled already".format(fut_to_sym[fut]))
+                # break
+            time_elapsed = az.utcnow() - start_time
+            sym_per_sec = total_processed / time_elapsed.total_seconds()
+            progress_str = "{}/{} (suc/total) symbols processed. Speed: {:.2f} symbols/second."\
+                .format(sym_processed, total_processed, sym_per_sec)
+            if total_processed % 50 == 0:
+                logging.info(progress_str)
+            else:
+                logging.debug(progress_str)
+
+    if symbols_without_data:
+        logging.warning("Symbols without data: \n{}".format(pformat(symbols_without_data)))
+
+    progress_str = "{}/{} (suc/total) symbols processed. Speed: {:.2f} symbols/second."\
+        .format(sym_processed, total_processed, sym_per_sec)
+    logging.info(progress_str)
+    if symbols_without_data:
+        logging.warning("{} symbols without data.".format(len(symbols_without_data)))
 
     return sorted(list(set(succesful_symbols).union(uptodate)))
 
@@ -353,12 +507,13 @@ def change_to_score(change):
         changescore += 1
     return changescore
 
-def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=10):
 
-    """Perform delta-conversion based on the given column in a pandas.DataFrame.
+def deltaconvert(series, visualize=False, max_adj_outliers=10):
+
+    """Perform delta-conversion to given pd.Series.
 
     Delta-conversion returns 3 series as a tuple and possibly error message.
-    
+
     First series (D) contains daily returns where all the data has been removed
     that could make comparison difficult with other assets.
 
@@ -370,25 +525,23 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
     This is more suitable for calculating performance scores etc.
 
     Arguments:
-    df               -- pd.DataFrame to use
-    column           -- column header to use
+    series           -- series to use
     visualize        -- visualize results
     max_adj_outliers -- maximum number of adjancent outliers, if there are
                         actually more adjancent outliers than this then they will
                         not be considered outliers anymore. default value: 10
     """
-
     # MEDIAN_LEN = 50
     ZSCORE_CUT_RATIO = 2
 
-    df = df.dropna()
+    series = series.dropna()
 
-    if len(df) < 50:
+    if len(series) < 50:
         raise DeltaConversionException("Not enough data")
 
     lines_taken = 0
 
-    if df.index[0] > df.index[-1]:
+    if series.index[0] > series.index[-1]:
         raise DeltaConversionException("Wrong cronological order")
 
     # closes = []
@@ -408,14 +561,14 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
     #     datesord.reverse()
     #     lines.reverse()
 
-    closes = df["AdjClose(USD)"]
-    dates = df.index
+    closes = series
+    dates = series.index
 
     num_invalid_prices = 0
     deltapct = [np.nan]
     changescores = [np.nan]
     invalid_price_indices = []
-    for i in range(1, len(df)):
+    for i in range(1, len(series)):
         if closes[i - 1] > 0 and closes[i] > 0:
             change = closes[i] / closes[i - 1]
             deltapct.append(change - 1)
@@ -561,7 +714,7 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
         # plt.show()
 
     logging.debug("Conversion result: lines = {}, invalid closes = {}, gaps = {}, invalid dates = {}, outliers = {}"
-                  .format(len(df) - lines_taken, num_invalid_prices, num_gaps,
+                  .format(len(series) - lines_taken, num_invalid_prices, num_gaps,
                           num_invalid_chrono_orders, len(confirmed_outliers)))
 
     indices_to_rem = list(set(gap_indices + confirmed_outliers + invalid_price_indices))
@@ -575,6 +728,7 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
     weeklydeltapct = []
     weeklydatesmod = []
     lastidx = -1
+    # resample to W-FRI (could be done with pandas)
     for i in range(len(closesmod)):
         if datesmod[i].weekday() == 4:
             dd = (datesmod[i] - datesmod[lastidx]).days
@@ -604,8 +758,7 @@ def deltaconvert(df, column="AdjClose(USD)", visualize=False, max_adj_outliers=1
 def check_delta_uptodate(sym, db_dir=None):
     if not db_dir:
         db_dir = os.path.join(default_findb_dir(), 'db')
-    yahoo_dir = os.path.join(db_dir, 'Yahoo')
-    symloc = os.path.join(yahoo_dir, sym)
+    symloc = os.path.join(db_dir, sym)
     dloc = symloc + '~D'
     wloc = symloc + '~W'
     dsloc = symloc + '~DS'
@@ -639,8 +792,7 @@ def check_delta_uptodate(sym, db_dir=None):
 def save_deltas(data, sym, db_dir=None):
     if not db_dir:
         db_dir = os.path.join(default_findb_dir(), 'db')
-    yahoo_dir = os.path.join(db_dir, 'Yahoo')
-    symloc = os.path.join(yahoo_dir, sym)
+    symloc = os.path.join(db_dir, sym)
     dloc = symloc + '~D'
     wloc = symloc + '~W'
     dsloc = symloc + '~DS'
@@ -656,8 +808,7 @@ def save_deltas(data, sym, db_dir=None):
 def save_invalid_deltas(sym, err, db_dir=None):
     if not db_dir:
         db_dir = os.path.join(default_findb_dir(), 'db')
-    yahoo_dir = os.path.join(db_dir, 'Yahoo')
-    symloc = os.path.join(yahoo_dir, sym)
+    symloc = os.path.join(db_dir, sym)
     dloc = symloc + '~D'
     wloc = symloc + '~W'
     dsloc = symloc + '~DS'
@@ -670,9 +821,9 @@ def save_invalid_deltas(sym, err, db_dir=None):
     pickle.dump(ds_data, open(dsloc, 'wb'))
 
 
-def fetch_deltas(selections, findb_dir=None, visualize=False, groups_file=None):
+def fetch_deltas(selections, findb_dir=None, visualize=False):
 
-    """Fetch deltas for the given selections (yahoo) and save to HDF-database.
+    """Fetch deltas for the given selections and save to database.
 
     Arguments:
     selections  -- yahoo symbols or symbol groups to calculate the deltas for
@@ -686,14 +837,8 @@ def fetch_deltas(selections, findb_dir=None, visualize=False, groups_file=None):
     if not findb_dir:
         findb_dir = default_findb_dir()
 
-    if not groups_file:
-        groups_file = os.path.join(findb_dir, 'yahoo_groups.yaml')
+    all_symbols = selections
 
-    if os.path.isfile(groups_file):
-        all_symbols = findb.selector.selections_to_symbols(selections, groups_file)
-    else:
-        all_symbols = selections
-    
     db_dir = os.path.join(findb_dir, 'db')
     existing_symbols = list(filter(lambda x: symbol_in_db(x, db_dir), all_symbols))
     diff = set(all_symbols).difference(set(existing_symbols))
@@ -707,17 +852,33 @@ def fetch_deltas(selections, findb_dir=None, visualize=False, groups_file=None):
         return sorted(list(calculated_deltas))
     logging.info("{} symbols already have deltas, {} to new deltas to calculate."
                  .format(len(existing_symbols) - len(deltas_to_calc), len(deltas_to_calc)))
-    yahoo_dir = os.path.join(db_dir, 'Yahoo')
 
     start_time = az.utcnow()
     total_processed = 0
     succesful_conversions = []
     for sym in deltas_to_calc:
-        symloc = os.path.join(yahoo_dir, sym)
+        symloc = os.path.join(db_dir, sym)
         df = load_pfile(symloc)
         logging.debug("Delta-converting {}...".format(sym))
         try:
-            res = deltaconvert(df)
+            splitted = sym.split('/')
+            data_provider = splitted[0]
+            if data_provider == "Yahoo":
+                col = "AdjClose(USD)"
+            elif data_provider == "Quandl":
+                assert len(splitted) >= 3
+                qdl_db = splitted[1]
+                if qdl_db == "WIKI":
+                    col = "Adj. Close"
+                elif qdl_db == "BAVERAGE":
+                    col = "24h Average"
+                else:
+                    raise Exception("Quantdl database '{}' is not supported for delta conversion"
+                                    .format(qdl_db))
+            else:
+                raise Exception("Provider {} is not supported for delta conversion"
+                                .format(data_provider))
+            res = deltaconvert(df[col])
             succesful_conversions.append(sym)
             save_deltas(res, sym, db_dir=db_dir)
         except DeltaConversionException as err:
@@ -762,7 +923,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     azlib.azlogging.quick_config(args.v, args.quiet)
-    
+
     # this old code is not up-to-date
 
     # home = os.path.expanduser("~")
