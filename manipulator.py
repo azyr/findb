@@ -96,7 +96,7 @@ def load_yahoo_sym_data(findb_dir=None):
     if not findb_dir:
         findb_dir = default_findb_dir()
     fpath = os.path.join(findb_dir, 'yahoo_symbols.csv')
-    return pd.DataFrame.from_csv(fpath)
+    return pd.DataFrame.from_csv(fpath, sep='|')
 
 
 def check_yahoo_uptodate(sym, update_freq=1, db_dir=None):
@@ -451,7 +451,7 @@ def download_quandl(selections, **kwargs):
             sym = fut_to_sym[fut]
             ex = fut.exception()
             if ex:
-                logging.debug(ex.__repr__())
+                logging.debug("{}: {}".format(sym, ex.__repr__()))
             if not ex:
                 sym_processed += 1
                 succesful_symbols.append(sym)
@@ -872,6 +872,16 @@ def fetch_deltas(selections, findb_dir=None, visualize=False):
                     col = "Adj. Close"
                 elif qdl_db == "BAVERAGE":
                     col = "24h Average"
+                elif qdl_db == "GOOG":
+                    col = "Close"
+                elif qdl_db == "YAHOO":
+                    col = "Adjusted Close"
+                elif qdl_db == "ECB":
+                    col = "Value"
+                elif qdl_db == "FRED":
+                    col = "Value"
+                elif qdl_db == "BOE":
+                    col = "Value"
                 else:
                     raise Exception("Quantdl database '{}' is not supported for delta conversion"
                                     .format(qdl_db))

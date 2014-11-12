@@ -102,6 +102,10 @@ def selections_to_symbols(selections, shortcuts_file=None):
         findbdir = os.path.join(home, 'findb')
         shortcuts_file = os.path.join(findbdir, 'shortcuts.conf')
 
+    if not os.path.isfile(shortcuts_file):
+        logging.warning("Shortcut file {} not found".format(shortcuts_file))
+        return selections
+
     sym_groups = read_groups(shortcuts_file)
 
     symbols = []
