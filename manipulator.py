@@ -76,6 +76,8 @@ def check_pfile_uptodate(fpath, update_freq):
         os.remove(fpath)
         logging.info("Removed corrupt file from db ({}): {!r}".format(fpath, err))
         return False
+    if 'do_not_update' in fdict and fdict['do_not_update']:
+        return True
     if 'last_update' not in fdict:
         return False
     return az.utcnow() - pd.tseries.offsets.BDay(update_freq) < fdict['last_update']
@@ -204,12 +206,49 @@ def convert_to_usd(df, db_dir=None):
         df["AdjClose(USD)"] = df[lastcol] * fxdata
         return df
 
-
 def strip_data_provider(sym, provider):
     try:
         return sym[sym.index(provider + '/') + len(provider) + 1:]
     except ValueError:
         return sym
+
+def freeze_files(selections, **kwargs):
+    return set_flags(selections, {'do_not_update': True}, **kwargs)
+
+
+def defreeze_files(selections, **kwargs):
+    return set_flags(selections, {'do_not_update': False}, **kwargs)
+
+
+def set_flags(selections, flags, **kwargs):
+    """Set flags for pfiles (internal use only)
+
+    Return list of failed symbols.
+    """
+    if 'data' in flags:
+        raise Exception("data is a reserved flag, please check flags")
+    if 'last_update' in flags:
+        raise Exception("last_update is a reserved flag, please check flags")
+    findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
+    shortcuts_file = kwargs.pop('shortcuts_file', os.path.join(findb_dir, 'shortcuts.conf'))
+    for kwarg in kwargs:
+        raise Exception("Keyword argument '{}' not supported.".format(kwarg))
+    symbols = findb.selector.selections_to_symbols(selections, shortcuts_file)
+    failed = []
+    for sym in symbols:
+        fpath = os.path.join(findb_dir, 'db', sym)
+        if not os.path.isfile(fpath):
+            logging.warning("Cannot set flags for {}: file not found".format(fpath))
+            failed.append(sym)
+            continue
+        try:
+            fdict = pickle.load(open(fpath, 'rb'))
+        except EOFError as err:
+            logging.warning("Cannot set flags for {}: corrupt file".format(fpath))
+            failed.append(sym)
+            continue
+        fdict.update(flags)
+    return failed
 
 
 def download_data(selections, **kwargs):
@@ -882,6 +921,8 @@ def fetch_deltas(selections, findb_dir=None, visualize=False):
                     col = "Value"
                 elif qdl_db == "BOE":
                     col = "Value"
+                elif qdl_db == "CME":
+                    col = "Settle"
                 else:
                     raise Exception("Quantdl database '{}' is not supported for delta conversion"
                                     .format(qdl_db))

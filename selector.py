@@ -240,6 +240,8 @@ def get_data(selections, datatype="C", **kwargs):
                         col = "Adj. Close"
                     elif qdl_db == "BAVERAGE":
                         col = "24h Average"
+                    elif qdl_db == "CURRFX":
+                        col = "Rate"
                     else:
                         raise Exception("Quantdl database '{}' => unknown close column"
                                         .format(qdl_db))
