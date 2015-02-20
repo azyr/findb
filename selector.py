@@ -1,6 +1,7 @@
 import logging
 import os.path
 import pickle
+import pandas as pd
 # import hashlib
 import azlib as az
 import findb.manipulator
@@ -126,71 +127,93 @@ def selections_to_symbols(selections, shortcuts_file=None):
     return symbols
 
 
-def get_yahoo_bars(selections, bartype="", **kwargs):
-    """Return a dictionary of yahoo bars or delta-returns given selections.
+# def get_yahoo_bars(selections, bartype="", **kwargs):
+#     """Return a dictionary of yahoo bars or delta-returns given selections.
+# 
+#     Returning dictionary will have key as a name of the symbol and value
+#     is the data that was fetched for that symbol.
+# 
+#     Arguments:
+#     selections   -- yahoo symbols or symbol groups to fetch
+#     bartype      -- what kind of data to fetch
+#                     "" = bars, "D" = daily delta,
+#                     "W" = weekly delta, "DS" = daily delta-score
+# 
+#     Keyword arguments:
+#     fetch_missing     -- fetch missing data (default: True)
+#     dl_threads         -- # of threads to use for download (default: 5)
+#     update_freq       -- update frequency (business days) when fetching data
+#                          (default: 1)
+#     """
+# 
+#     fetch_missing = kwargs.pop("fetch_missing", True)
+#     dl_threads = kwargs.pop("dl_threads", 5)
+#     update_freq = kwargs.pop("update_freq", 1)
+#     findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
+#     groups_file = kwargs.pop('groups_file', os.path.join(findb_dir, 'yahoo_groups.yaml'))
+#     for kwarg in kwargs:
+#         raise Exception("Keyword argument '{}' not supported.".format(kwarg))
+# 
+#     if bartype == "":
+#         suffix = ""
+#     elif bartype == "D":
+#         suffix = "~D"
+#     elif bartype == "W":
+#         suffix = "~W"
+#     elif bartype == "DS":
+#         suffix = "~DS"
+#     else:
+#         raise Exception('Bartype "{}" not supported.'.format(bartype))
+# 
+#     if fetch_missing:
+#         selections = findb.manipulator.download_yahoo(selections, findb_dir=findb_dir,
+#                                                       update_freq=update_freq, 
+#                                                       dl_threads=dl_threads)
+#         if bartype:
+#             selections = findb.manipulator.fetch_deltas(selections, findb_dir=findb_dir)
+#     else:
+#         selections = selections_to_symbols(selections, groups_file)
+# 
+#     res = {}
+#     yahoo_dir = os.path.join(findb_dir, 'db', 'Yahoo')
+#     for sym in selections:
+#         fpath = os.path.join(yahoo_dir, sym + suffix)
+#         data = pickle.load(open(fpath, 'rb'))['data']
+#         if data is not None:
+#             res[sym] = data
+# 
+#     return res
 
-    Returning dictionary will have key as a name of the symbol and value
-    is the data that was fetched for that symbol.
+
+def get_data(selections, datatype="A", **kwargs):
+    """Fetch financial data using findb.
+
+    Return type is specified from datatype.
 
     Arguments:
-    selections   -- yahoo symbols or symbol groups to fetch
-    bartype      -- what kind of data to fetch
-                    "" = bars, "D" = daily delta,
-                    "W" = weekly delta, "DS" = daily delta-score
-
-    Keyword arguments:
-    fetch_missing     -- fetch missing data (default: True)
-    dl_threads         -- # of threads to use for download (default: 5)
-    update_freq       -- update frequency (business days) when fetching data
-                         (default: 1)
+    selections     -- Selections to fetch
+    bartype        -- What type of data to return:
+                      A  = All data
+                      C  = Closes (adjusted closes if available)
+                      D  = Delta D
+                      W  = Delta W
+                      DS = Delta DS
+    fetch_missing  -- Download missing data. Default: True
+    dl_threads     -- Number of threads to use for download. Default: 5
+    update_freq    -- Update frequency (business days) when fetching data.
+                      Default: 1
+    findb_dir      -- findb directory to use. Default: $HOME/findb
+    shortcuts_file -- Shortcuts file for group selections.
+                      Default: findb_dir/shortcuts.conf
+    no_path        -- Cut the path out of the symbol names of the resulting
+                      dictionary. Default: False
     """
-
-    fetch_missing = kwargs.pop("fetch_missing", True)
-    dl_threads = kwargs.pop("dl_threads", 5)
-    update_freq = kwargs.pop("update_freq", 1)
-    findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
-    groups_file = kwargs.pop('groups_file', os.path.join(findb_dir, 'yahoo_groups.yaml'))
-    for kwarg in kwargs:
-        raise Exception("Keyword argument '{}' not supported.".format(kwarg))
-
-    if bartype == "":
-        suffix = ""
-    elif bartype == "D":
-        suffix = "~D"
-    elif bartype == "W":
-        suffix = "~W"
-    elif bartype == "DS":
-        suffix = "~DS"
-    else:
-        raise Exception('Bartype "{}" not supported.'.format(bartype))
-
-    if fetch_missing:
-        selections = findb.manipulator.download_yahoo(selections, findb_dir=findb_dir,
-                                                      update_freq=update_freq, 
-                                                      dl_threads=dl_threads)
-        if bartype:
-            selections = findb.manipulator.fetch_deltas(selections, findb_dir=findb_dir)
-    else:
-        selections = selections_to_symbols(selections, groups_file)
-
-    res = {}
-    yahoo_dir = os.path.join(findb_dir, 'db', 'Yahoo')
-    for sym in selections:
-        fpath = os.path.join(yahoo_dir, sym + suffix)
-        data = pickle.load(open(fpath, 'rb'))['data']
-        if data is not None:
-            res[sym] = data
-
-    return res
-
-
-def get_data(selections, datatype="C", **kwargs):
-    """Generic fetcher"""
     fetch_missing = kwargs.pop("fetch_missing", True)
     dl_threads = kwargs.pop("dl_threads", 5)
     update_freq = kwargs.pop("update_freq", 1)
     findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
     shortcuts_file = kwargs.pop('shortcuts_file', os.path.join(findb_dir, 'shortcuts.conf'))
+    no_path = kwargs.pop('no_path', False) 
     for kwarg in kwargs:
         raise Exception("Keyword argument '{}' not supported.".format(kwarg))
     db_dir = os.path.join(findb_dir, 'db')
@@ -229,6 +252,9 @@ def get_data(selections, datatype="C", **kwargs):
         data = pickle.load(open(fpath, 'rb'))['data']
         if data is not None:
             splitted = sym.split('/')
+            ret_sym = sym
+            if no_path:
+                ret_sym = sym.split('/')[-1]
             if datatype == "C":
                 data_provider = splitted[0]
                 if data_provider == "Yahoo":
@@ -242,12 +268,17 @@ def get_data(selections, datatype="C", **kwargs):
                         col = "24h Average"
                     elif qdl_db == "CURRFX":
                         col = "Rate"
+                    elif qdl_db == "NASDAQOMX":
+                        col = "Index Value"
                     else:
                         raise Exception("Quantdl database '{}' => unknown close column"
                                         .format(qdl_db))
                 else:
                     raise Exception("Unknown data provider: {}".format(data_provider))
-                res[sym] = data[col]
+                res[ret_sym] = data[col]
             else:
-                res[sym] = data
-    return res
+                res[ret_sym] = data
+    if type(res[ret_sym]) is pd.DataFrame:
+        return pd.Panel(res)
+    else:
+        return pd.DataFrame(res)

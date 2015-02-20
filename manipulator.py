@@ -86,7 +86,7 @@ def check_pfile_uptodate(fpath, update_freq):
 def save_pfile(data, fpath, save_hash=False):
     fdict = {'data': data, 'last_update': az.utcnow()}
     if save_hash:
-        fdict['sha1'] = hashlib.sha1(pickle.dumps(fdict)).digest()
+        fdict['sha1'] = hashlib.sha1(pickle.dumps(data)).digest()
     pickle.dump(fdict, open(fpath, 'wb'))
 
 
@@ -247,7 +247,13 @@ def set_flags(selections, flags, **kwargs):
             logging.warning("Cannot set flags for {}: corrupt file".format(fpath))
             failed.append(sym)
             continue
-        fdict.update(flags)
+        file_changed = False
+        for flag in flags:
+            if not flag in fdict or flags[flag] != fdict[flag]:
+                fdict[flag] = flags[flag]
+                file_changed = True
+        if file_changed:
+            pickle.dump(fdict, open(fpath, 'wb'))
     return failed
 
 
@@ -923,6 +929,10 @@ def fetch_deltas(selections, findb_dir=None, visualize=False):
                     col = "Value"
                 elif qdl_db == "CME":
                     col = "Settle"
+                elif qdl_db == "ICE":
+                    col = "Settle"
+                elif qdl_db == "NASDAQOMX":
+                    col = "Index Value"
                 else:
                     raise Exception("Quantdl database '{}' is not supported for delta conversion"
                                     .format(qdl_db))
