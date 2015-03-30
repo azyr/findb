@@ -211,6 +211,7 @@ def get_data(selections, datatype="A", **kwargs):
     fetch_missing = kwargs.pop("fetch_missing", True)
     dl_threads = kwargs.pop("dl_threads", 5)
     update_freq = kwargs.pop("update_freq", 1)
+    retry = kwargs.pop("retry", False)
     findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
     shortcuts_file = kwargs.pop('shortcuts_file', os.path.join(findb_dir, 'shortcuts.conf'))
     no_path = kwargs.pop('no_path', False) 
@@ -239,7 +240,8 @@ def get_data(selections, datatype="A", **kwargs):
                                                   dl_threads=dl_threads,
                                                   update_freq=update_freq,
                                                   findb_dir=findb_dir,
-                                                  shortcuts_file=shortcuts_file)[1]
+                                                  shortcuts_file=shortcuts_file,
+                                                  retry=retry)[1]
     else:
         symbols = selections_to_symbols(selections, shortcuts_file)
     res = {}

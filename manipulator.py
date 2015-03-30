@@ -20,38 +20,38 @@ from datetime import datetime
 from pprint import pformat
 
 
-"""Lookup table for FRED symbols.
-
-Fred is missing some currencies that appear in Yahoo Finance:
-    ILS = Israeli New Sheqel
-    RUB = Russian Ruble
-    IDR = Indonesian Rupiah
-    ARS = Argentine Peso
-"""
-fred_currencies = {
-    # USD/XYZ
-    "EUR": "DEXUSEU",
-    "GBP": "DEXUSUK",
-    "CAD": "DEXCAUS",
-    "AUD": "DEXUSAL",
-    "NZD": "DEXUSNZ",
-    # XYZ/USD
-    "CHF": "DEXSZUS",
-    "JPY": "DEXJPUS",
-    "MXN": "DEXMXUS",
-    "HKD": "DEXHKUS",
-    "ZAR": "DEXSFUS",
-    "SEK": "DEXSDUS",
-    "SGD": "DEXSIUS",
-    "NOK": "DEXNOUS",
-    "DKK": "DEXDNUS",
-    "BRL": "DEXBZUS",
-    "CNY": "DEXCHUS",
-    "INR": "DEXINUS",
-    "KRW": "DEXKOUS",
-    "MYR": "DEXMAUS",
-    "TWD": "DEXTAUS"
-}
+# """Lookup table for FRED symbols.
+# 
+# Fred is missing some currencies that appear in Yahoo Finance:
+#     ILS = Israeli New Sheqel
+#     RUB = Russian Ruble
+#     IDR = Indonesian Rupiah
+#     ARS = Argentine Peso
+# """
+# fred_currencies = {
+#     # USD/XYZ
+#     "EUR": "DEXUSEU",
+#     "GBP": "DEXUSUK",
+#     "CAD": "DEXCAUS",
+#     "AUD": "DEXUSAL",
+#     "NZD": "DEXUSNZ",
+#     # XYZ/USD
+#     "CHF": "DEXSZUS",
+#     "JPY": "DEXJPUS",
+#     "MXN": "DEXMXUS",
+#     "HKD": "DEXHKUS",
+#     "ZAR": "DEXSFUS",
+#     "SEK": "DEXSDUS",
+#     "SGD": "DEXSIUS",
+#     "NOK": "DEXNOUS",
+#     "DKK": "DEXDNUS",
+#     "BRL": "DEXBZUS",
+#     "CNY": "DEXCHUS",
+#     "INR": "DEXINUS",
+#     "KRW": "DEXKOUS",
+#     "MYR": "DEXMAUS",
+#     "TWD": "DEXTAUS"
+# }
 
 
 class FXDataNotFoundException(Exception):
@@ -129,7 +129,7 @@ def dl_and_process_yahoo_symbol(sym, currency=None, db_dir=None):
     fpath = os.path.join(yahoo_dir, sym)
     df = yahoodl.dl(sym, currency)
     df = df.copy()
-    df = convert_to_usd(df, db_dir)
+    # df = convert_to_usd(df, db_dir)
     save_pfile(df, fpath, save_hash=True)
 
 
@@ -145,66 +145,60 @@ def dl_and_process_quandl_symbol(sym, db_dir=None, authtoken=""):
     save_pfile(df, fpath, save_hash=True)
 
 
-def update_fred_fxdata(update_freq=1, db_dir=None):
-    if not db_dir:
-        db_dir = os.path.join(default_findb_dir(), 'db')
-    sym_to_update = []
-    for sym in fred_currencies.values():
-        fpath = os.path.join(db_dir, 'FRED', sym)
-        if not check_pfile_uptodate(fpath, update_freq):
-            sym_to_update.append(sym)
-    if not sym_to_update:
-        return
-    start = datetime(1900, 1, 1)
-    end = datetime(2020, 1, 1)
-    logging.debug("{} FRED currencies up-to-date, downloading {} pairs..."
-                  .format(len(fred_currencies) - len(sym_to_update), len(sym_to_update)))
-    fxdata = pandas.io.data.DataReader(sym_to_update, 'fred', start, end)
-    for sym in fxdata:
-        fpath = os.path.join(db_dir, 'FRED', sym)
-        save_pfile(fxdata[sym], fpath)
+# def update_fred_fxdata(update_freq=1, db_dir=None):
+#     if not db_dir:
+#         db_dir = os.path.join(default_findb_dir(), 'db')
+#     sym_to_update = []
+#     for sym in fred_currencies.values():
+#         fpath = os.path.join(db_dir, 'FRED', sym)
+#         if not check_pfile_uptodate(fpath, update_freq):
+#             sym_to_update.append(sym)
+#     if not sym_to_update:
+#         return
+#     start = datetime(1900, 1, 1)
+#     end = datetime(2020, 1, 1)
+#     logging.debug("{} FRED currencies up-to-date, downloading {} pairs..."
+#                   .format(len(fred_currencies) - len(sym_to_update), len(sym_to_update)))
+#     fxdata = pandas.io.data.DataReader(sym_to_update, 'fred', start, end)
+#     for sym in fxdata:
+#         fpath = os.path.join(db_dir, 'FRED', sym)
+#         save_pfile(fxdata[sym], fpath)
 
 
 # This is required to serialize access to certain pandas operations
 mylock = threading.Lock()
 
 
-def convert_to_usd(df, db_dir=None):
+def convert_to_usd(x, db_dir=None):
     """
-    Convert Yahoo historical pd.DataFrame AdjCloses to USD.
-
-    Last column must contain the currency info. (USD will be skipped)
-    Returns converted pd.DataFrame.
-
-    Arguments:
-    files   -- files to convert
-    db_dir  -- db directory (default: $HOME/findb/db)
-               Will not save the file! db_dir is used to find fxdata.
+    x = series
+    TODO: implement this! FRED doesnt provide fxdata anymore!
     """
     if not db_dir:
         db_dir = os.path.join(default_findb_dir(), 'db')
-    lastcol = df.columns[-1]
-    currency = lastcol[-4:-1]
-    if currency == "USD":  # conversion not required
-        return df
-    try:
-        fxname = fred_currencies[currency]
-    except KeyError:
-        raise FXDataNotFoundException(currency)
-    fxfileloc = os.path.join(db_dir, 'FRED', fxname)
-    fxdata = load_pfile(fxfileloc)
-    # fill missing dates (i.e. US holidays) using the last available value
-    fxdata = fxdata.fillna(method='ffill')
-    # Seems like division and multiply operators are not thread safe even for read operations!
-    with mylock:
-        # take inverse of usdxxx pairs (ending "XXUS")
-        if fxname[-2:] == "US":
-            fxdata = 1 / fxdata
-    # import threading
-    # tident = hex(threading.current_thread().ident)
-    # pickle.dump([df, fxdata], open('/home/seb/temp/dfdump/{}'.format(tident), 'wb'))
-        df["AdjClose(USD)"] = df[lastcol] * fxdata
-        return df
+    return x
+    # lastcol = df.columns[-1]
+    # currency = lastcol[-4:-1]
+    # if currency == "USD":  # conversion not required
+    #     return df
+    # try:
+    #     fxname = fred_currencies[currency]
+    # except KeyError:
+    #     raise FXDataNotFoundException(currency)
+    # fxfileloc = os.path.join(db_dir, 'FRED', fxname)
+    # fxdata = load_pfile(fxfileloc)
+    # # fill missing dates (i.e. US holidays) using the last available value
+    # fxdata = fxdata.fillna(method='ffill')
+    # # Seems like division and multiply operators are not thread safe even for read operations!
+    # with mylock:
+    #     # take inverse of usdxxx pairs (ending "XXUS")
+    #     if fxname[-2:] == "US":
+    #         fxdata = 1 / fxdata
+    # # import threading
+    # # tident = hex(threading.current_thread().ident)
+    # # pickle.dump([df, fxdata], open('/home/seb/temp/dfdump/{}'.format(tident), 'wb'))
+    #     df["AdjClose(USD)"] = df[lastcol] * fxdata
+    #     return df
 
 def strip_data_provider(sym, provider):
     try:
@@ -262,6 +256,7 @@ def download_data(selections, **kwargs):
     delta_convert = kwargs.pop("delta_convert", True)
     dl_threads = kwargs.pop("dl_threads", 5)
     update_freq = kwargs.pop("update_freq", 1)
+    retry = kwargs.pop("retry", False)
     findb_dir = kwargs.pop("findb_dir", findb.manipulator.default_findb_dir())
     shortcuts_file = kwargs.pop('shortcuts_file', os.path.join(findb_dir, 'shortcuts.conf'))
     for kwarg in kwargs:
@@ -270,25 +265,30 @@ def download_data(selections, **kwargs):
     symbols = findb.selector.selections_to_symbols(selections, shortcuts_file)
     yahoo_symbols = [s for s in symbols if s.find('Yahoo/') == 0]
     quandl_symbols = [s for s in symbols if s.find('Quandl/') == 0]
-    downloaded = set()
-    if yahoo_symbols:
-        yres = findb.manipulator.download_yahoo(yahoo_symbols, findb_dir=findb_dir,
-                                                update_freq=update_freq,
-                                                dl_threads=dl_threads)
-        yres = ["Yahoo/" + s for s in yres]
-        downloaded = downloaded.union(set(yres))
-    if quandl_symbols:
-        auth_token = "irmSGyQoEh7gZd2SuYML"
-        qres = findb.manipulator.download_quandl(quandl_symbols, findb_dir=findb_dir,
-                                                 update_freq=update_freq,
-                                                 dl_threads=dl_threads,
-                                                 auth_token=auth_token)
-        qres = ["Quandl/" + s for s in qres]
-        downloaded = downloaded.union(set(qres))
-    converted = downloaded
-    if delta_convert:
-        converted = fetch_deltas(downloaded, findb_dir=findb_dir)
-    return downloaded, converted
+    while True:
+        downloaded = set()
+        if yahoo_symbols:
+            yres = findb.manipulator.download_yahoo(yahoo_symbols, findb_dir=findb_dir,
+                                                    update_freq=update_freq,
+                                                    dl_threads=dl_threads)
+            yres = ["Yahoo/" + s for s in yres]
+            downloaded = downloaded.union(set(yres))
+        if quandl_symbols:
+            auth_token = "irmSGyQoEh7gZd2SuYML"
+            qres = findb.manipulator.download_quandl(quandl_symbols, findb_dir=findb_dir,
+                                                    update_freq=update_freq,
+                                                    dl_threads=dl_threads,
+                                                    auth_token=auth_token)
+            qres = ["Quandl/" + s for s in qres]
+            downloaded = downloaded.union(set(qres))
+        converted = downloaded
+        if delta_convert:
+            converted = fetch_deltas(downloaded, findb_dir=findb_dir)
+        if retry and len(downloaded) != len(symbols):
+            logging.debug("Downloaded {} / {}, retrying..."
+                          .format(len(downloaded), len(symbols)))
+            continue
+        return downloaded, converted
 
 
 def download_yahoo(selections, **kwargs):
@@ -337,7 +337,6 @@ def download_yahoo(selections, **kwargs):
     if not good_symbols:
         logging.debug("No symbols to download.")
         return
-    update_fred_fxdata()
     l = lambda x: not check_yahoo_uptodate(x, update_freq=update_freq, db_dir=db_dir)
     symbols_to_dl = list(filter(l, good_symbols))
     uptodate = set(good_symbols).difference(set(symbols_to_dl))
