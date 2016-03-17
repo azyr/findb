@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 import concurrent.futures
@@ -274,12 +275,9 @@ def download_data(selections, **kwargs):
             yres = ["Yahoo/" + s for s in yres]
             downloaded = downloaded.union(set(yres))
         if quandl_symbols:
-            # auth_token = "irmSGyQoEh7gZd2SuYML"
-            auth_token = "kogbw9fr5m-6vz-WqL6Q"
             qres = findb.manipulator.download_quandl(quandl_symbols, findb_dir=findb_dir,
                                                     update_freq=update_freq,
-                                                    dl_threads=dl_threads,
-                                                    auth_token=auth_token)
+                                                    dl_threads=dl_threads)
             qres = ["Quandl/" + s for s in qres]
             downloaded = downloaded.union(set(qres))
         converted = downloaded
@@ -456,6 +454,10 @@ def download_quandl(selections, **kwargs):
     db_dir = kwargs.pop('db_dir', os.path.join(findb_dir, 'db'))
     update_freq = kwargs.pop('update_freq', 1)
     auth_token = kwargs.pop('auth_token', '')
+    if not auth_token:
+        script_dir = os.path.dirname(os.path.realpath(__file__))
+        settings = json.load(open(os.path.join(script_dir, "settings.json")))
+        auth_token = settings["quandl_token"]
     for kwarg in kwargs:
         raise Exception("Keyword argument '{}' not supported.".format(kwarg))
     if not selections:
