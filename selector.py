@@ -244,6 +244,8 @@ def get_data(selections, datatype="A", **kwargs):
                                                   retry=retry)[1]
     else:
         symbols = selections_to_symbols(selections, shortcuts_file)
+    if not symbols:
+        return None
     res = {}
     for sym in symbols:
         if not findb.manipulator.symbol_in_db(sym, db_dir):

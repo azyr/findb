@@ -13,7 +13,7 @@ import azlib as az
 import azlib.azlogging
 import pandas as pd
 import pandas.tseries.offsets
-import pandas.io.data
+# import pandas.io.data
 import bottleneck as bn
 import numpy as np
 from datetime import datetime
@@ -274,7 +274,8 @@ def download_data(selections, **kwargs):
             yres = ["Yahoo/" + s for s in yres]
             downloaded = downloaded.union(set(yres))
         if quandl_symbols:
-            auth_token = "irmSGyQoEh7gZd2SuYML"
+            # auth_token = "irmSGyQoEh7gZd2SuYML"
+            auth_token = "kogbw9fr5m-6vz-WqL6Q"
             qres = findb.manipulator.download_quandl(quandl_symbols, findb_dir=findb_dir,
                                                     update_freq=update_freq,
                                                     dl_threads=dl_threads,
