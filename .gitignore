@@ -9,3 +9,4 @@ __pycache__
 *~lock*
 *.pyc
 *.p
+settings.json

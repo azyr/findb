@@ -925,6 +925,8 @@ def fetch_deltas(selections, findb_dir=None, visualize=False):
                     col = "Adjusted Close"
                 elif qdl_db == "ECB":
                     col = "Value"
+                elif qdl_db == "CURRFX":
+                    col = "Rate"
                 elif qdl_db == "FRED":
                     col = "Value"
                 elif qdl_db == "BOE":
@@ -936,7 +938,7 @@ def fetch_deltas(selections, findb_dir=None, visualize=False):
                 elif qdl_db == "NASDAQOMX":
                     col = "Index Value"
                 else:
-                    raise Exception("Quantdl database '{}' is not supported for delta conversion"
+                    raise Exception("Quandl database '{}' is not supported for delta conversion"
                                     .format(qdl_db))
             else:
                 raise Exception("Provider {} is not supported for delta conversion"
